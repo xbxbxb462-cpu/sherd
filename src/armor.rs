@@ -107,7 +107,7 @@ fn parse_armor_structure(text: &str) -> Result<(String, String)> {
     if begin_label.is_empty() {
         bail!("bad");
     }
-    // Label must be a known Fortis label.
+    // Label must be a known Sherd label.
     if !matches!(
         begin_label.as_str(),
         ARMOR_MSG | ARMOR_FILE | ARMOR_SHARE
@@ -304,9 +304,9 @@ mod tests {
     fn test_base64_rejects_invalid_chars() {
         assert!(base64_decode("AB!C").is_err());
         // Whitespace inside the input is stripped by base64_decode before
-        // validation. "AB C" → "ABC" (length 3, not a multiple of 4) →
-        // rejected for length, not for the space. Test a non-canonical
-        // character that survives the whitespace strip:
+        // validation. "AB C" becomes "ABC", length 3, not a multiple of 4,
+        // rejected for length not the space. Test a non-canonical character
+        // that survives the whitespace strip:
         assert!(base64_decode("AB*C").is_err());
     }
 
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_armor_roundtrip() {
-        let data = b"Hello, FORTIS! \x00\x01\x02\xff";
+        let data = b"Hello, SHERD! \x00\x01\x02\xff";
         let armored = armor(ARMOR_MSG, data);
         let dearmored = dearmor(&armored).unwrap();
         assert_eq!(dearmored, data);
@@ -354,8 +354,8 @@ mod tests {
     fn test_armor_strict_rejects_mismatched_labels() {
         let data = b"test";
         let armored = armor(ARMOR_MSG, data);
-        // Replace BEGIN label with FORTIS SHARE.
-        let tampered = armored.replace("BEGIN FORTIS MESSAGE", "BEGIN FORTIS SHARE");
+        // Replace BEGIN label with SHERD SHARE.
+        let tampered = armored.replace("BEGIN SHERD MESSAGE", "BEGIN SHERD SHARE");
         assert!(dearmor(&tampered).is_err());
     }
 

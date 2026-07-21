@@ -1,4 +1,4 @@
-# Dockerfile — isolated build environment for fortis.
+# Dockerfile — isolated build environment for sherd.
 #
 # Builds the release binary inside a clean container so that NO
 # developer-machine paths leak into the binary, regardless of the
@@ -6,11 +6,11 @@
 # scratch image (zero leftover build tools).
 #
 # Usage:
-#   docker build -t fortis .
-#   docker cp $(docker create fortis):/fortis ./fortis
+#   docker build -t sherd .
+#   docker cp $(docker create sherd):/sherd ./sherd
 #
 # Then verify:
-#   strings ./fortis | grep -iE '(/home/|/Users/|cargo/registry)'
+#   strings ./sherd | grep -iE '(/home/|/Users/|cargo/registry)'
 #   # Expected: no output
 
 FROM rust:1.85-slim AS builder
@@ -47,14 +47,14 @@ ENV SOURCE_DATE_EPOCH=0
 ENV CARGO_TERM_QUIET=true
 
 RUN cargo build --release \
- && strip --strip-all target/release/fortis
+ && strip --strip-all target/release/sherd
 
 # Stage 2: scratch image with ONLY the binary. No shell, no package
 # manager, no leftover source — nothing for an adversary to inspect.
 FROM scratch
-COPY --from=builder /build/target/release/fortis /fortis
+COPY --from=builder /build/target/release/sherd /sherd
 
 # Entry point is the binary itself. Run with:
-#   docker run --rm fortis --help
-ENTRYPOINT ["/fortis"]
+#   docker run --rm sherd --help
+ENTRYPOINT ["/sherd"]
 CMD ["--help"]

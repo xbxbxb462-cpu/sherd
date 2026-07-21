@@ -1,4 +1,4 @@
-//! Fortis: offline symmetric encryption tool.
+//! Sherd: offline symmetric encryption tool.
 //!
 //! Argon2id -> HKDF -> AES-256-GCM with per-chunk isolated keys.
 //! Key-commitment HMAC verified before AEAD decrypt. Secret buffers are
@@ -17,18 +17,17 @@ mod shamir;
 
 #[derive(Parser)]
 #[command(
-    name = "fortis",
-    version = "7.3.0",
+    version,
     about = "Offline encryption tool",
-    long_about = "Fortis v7.3.0 — single-binary offline encryption.\n\
-                  Argon2id → HKDF → AES-256-GCM (per-chunk, isolated keys).\n\
+    long_about = "Sherd v1.0.0 - single-binary offline encryption.\n\
+                  Argon2id -> HKDF -> AES-256-GCM (per-chunk, isolated keys).\n\
                   Key Commitment (HMAC-SHA256-trunc-128) verified before AEAD decrypt.\n\
                   Plausible deniability via indistinguishable decoy slot.\n\
                   Shamir Secret Sharing over GF(256).\n\
                   All secret buffers (incl. plaintext) are zeroized after use.\n\
                   Uniform-timing decryption.\n\
                   Branchless GF(256).\n\n\
-                  Run `fortis selftest` to verify cryptographic integrity before use."
+                  Run `sherd selftest` to verify cryptographic integrity before use."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,7 +38,7 @@ struct Cli {
 enum Command {
     /// Encrypt a message from stdin (or a file) to stdout (or a file)
     Encrypt(cli::EncryptArgs),
-    /// Decrypt a FORTIS message
+    /// Decrypt a Sherd message
     Decrypt(cli::DecryptArgs),
     /// Encrypt a file (binary envelope, .frts extension)
     EncryptFile(cli::EncryptFileArgs),
@@ -57,27 +56,24 @@ enum Command {
 
 /// Replace the default panic hook with one that prints a generic message.
 /// The default hook leaks source paths, line numbers, and backtraces to
-/// stderr, which terminal logs often capture. Drop impls run during
-/// unwinding before the hook fires, so secret buffers get wiped. Installed
-/// first, before mlockall and any secret material exists.
+/// stderr. Drop impls run during unwinding before the hook fires, so
+/// secret buffers get wiped first.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|_info| {
-        eprintln!("[fortis] FATAL: internal error — aborting.");
-        eprintln!("[fortis] No diagnostic details are printed to avoid leaking");
-        eprintln!("[fortis] source paths or memory state to terminal logs.");
-        eprintln!("[fortis] If this recurs, run `fortis selftest` to verify the");
-        eprintln!("[fortis] binary, then re-deploy from a trusted build.");
+        eprintln!("[sherd] FATAL: internal error, aborting.");
+        eprintln!("[sherd] No diagnostic details are printed to avoid leaking");
+        eprintln!("[sherd] source paths or memory state to terminal logs.");
+        eprintln!("[sherd] If this recurs, run `sherd selftest` to verify the");
+        eprintln!("[sherd] binary, then re-deploy from a trusted build.");
     }));
 }
 
 fn main() -> Result<()> {
-    // First thing in main: a panic in any later setup code must not leak
-    // paths via the default hook.
+    // Install before any code that could panic and leak paths via the hook.
     install_panic_hook();
 
     // Disable core dumps. A core file would contain the full process
-    // memory including passphrases and keys. Report failures so the
-    // operator knows dumps could not be disabled.
+    // memory including passphrases and keys.
     #[cfg(unix)]
     unsafe {
         let rlim = libc::rlimit {
@@ -87,23 +83,21 @@ fn main() -> Result<()> {
         if libc::setrlimit(libc::RLIMIT_CORE, &rlim) != 0 {
             let err = std::io::Error::last_os_error();
             eprintln!(
-                "[fortis] WARNING: failed to disable core dumps ({}). \
+                "[sherd] WARNING: failed to disable core dumps ({}). \
                  If the process crashes, secrets may be written to a core file.",
                 err
             );
         }
-        // Also call prctl(PR_SET_DUMPABLE, 0) on Linux. setrlimit covers
-        // core files; prctl additionally blocks ptrace attach by non-root
+        // prctl(PR_SET_DUMPABLE, 0) also blocks ptrace attach by non-root
         // users and disables dumps even if RLIMIT_CORE is later raised.
-        // PR_SET_DUMPABLE = 4. Linux-only; on other Unix only setrlimit
-        // applies.
+        // Linux-only; on other Unix only setrlimit applies.
         #[cfg(target_os = "linux")]
         {
             let pr_ret = libc::prctl(4, 0, 0, 0, 0);
             if pr_ret != 0 {
                 let err = std::io::Error::last_os_error();
                 eprintln!(
-                    "[fortis] WARNING: prctl(PR_SET_DUMPABLE, 0) failed ({}). \
+                    "[sherd] WARNING: prctl(PR_SET_DUMPABLE, 0) failed ({}). \
                      ptrace attach by same-UID processes may still be possible.",
                     err
                 );
@@ -111,30 +105,27 @@ fn main() -> Result<()> {
         }
     }
 
-    // FORTIS_ALLOW_NO_MLOCK policy:
-    //   - Release builds refuse to start if the env var is present at all,
-    //     catching operator mistakes or an adversary setting it.
-    //   - Debug builds honor it (value "1" or "true") with a loud warning,
-    //     so CI can run without CAP_IPC_LOCK.
+    // SHERD_ALLOW_NO_MLOCK: release builds refuse to start if the env var
+    // is present at all; debug builds honor it with a warning so CI can
+    // run without CAP_IPC_LOCK.
     #[cfg(unix)]
     {
         #[cfg(not(debug_assertions))]
         {
-            // Release: refuse if the variable is present at all.
-            if std::env::var_os("FORTIS_ALLOW_NO_MLOCK").is_some() {
-                eprintln!("[fortis] FATAL: FORTIS_ALLOW_NO_MLOCK is set in the environment,");
-                eprintln!("[fortis]        but this is a RELEASE build. The memory-lock");
-                eprintln!("[fortis]        bypass is FORBIDDEN in release builds to prevent");
-                eprintln!("[fortis]        a trivial memory-protection backdoor (an adversary");
-                eprintln!("[fortis]        who can set env vars could otherwise disable mlockall");
-                eprintln!("[fortis]        and cause secrets to swap to disk).");
-                eprintln!("[fortis]        To fix, unset the variable and grant CAP_IPC_LOCK:");
-                eprintln!("[fortis]          unset FORTIS_ALLOW_NO_MLOCK");
-                eprintln!("[fortis]          sudo setcap cap_ipc_lock=ep ./fortis");
-                eprintln!("[fortis]        or add to /etc/security/limits.conf:");
-                eprintln!("[fortis]          *  soft  memlock  unlimited");
-                eprintln!("[fortis]          *  hard  memlock  unlimited");
-                eprintln!("[fortis]        Refusing to continue.");
+            if std::env::var_os("SHERD_ALLOW_NO_MLOCK").is_some() {
+                eprintln!("[sherd] FATAL: SHERD_ALLOW_NO_MLOCK is set in the environment,");
+                eprintln!("[sherd]        but this is a RELEASE build. The memory-lock");
+                eprintln!("[sherd]        bypass is forbidden in release builds to prevent");
+                eprintln!("[sherd]        a trivial memory-protection backdoor: an adversary");
+                eprintln!("[sherd]        who can set env vars could otherwise disable mlockall");
+                eprintln!("[sherd]        and cause secrets to swap to disk.");
+                eprintln!("[sherd]        To fix, unset the variable and grant CAP_IPC_LOCK:");
+                eprintln!("[sherd]          unset SHERD_ALLOW_NO_MLOCK");
+                eprintln!("[sherd]          sudo setcap cap_ipc_lock=ep ./sherd");
+                eprintln!("[sherd]        or add to /etc/security/limits.conf:");
+                eprintln!("[sherd]          *  soft  memlock  unlimited");
+                eprintln!("[sherd]          *  hard  memlock  unlimited");
+                eprintln!("[sherd]        Refusing to continue.");
                 // Exit 2 = security policy violation. No secrets exist yet.
                 std::process::exit(2);
             }
@@ -143,13 +134,13 @@ fn main() -> Result<()> {
     let allow_no_mlock: bool = {
         #[cfg(debug_assertions)]
         {
-            let v = std::env::var("FORTIS_ALLOW_NO_MLOCK")
+            let v = std::env::var("SHERD_ALLOW_NO_MLOCK")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
             if v {
-                eprintln!("[fortis] WARNING: FORTIS_ALLOW_NO_MLOCK=1 — DEBUG BUILD ONLY.");
-                eprintln!("[fortis]          Secrets MAY swap to disk. DO NOT use this");
-                eprintln!("[fortis]          configuration with real sensitive data.");
+                eprintln!("[sherd] WARNING: SHERD_ALLOW_NO_MLOCK=1, DEBUG BUILD ONLY.");
+                eprintln!("[sherd]          Secrets MAY swap to disk. DO NOT use this");
+                eprintln!("[sherd]          configuration with real sensitive data.");
             }
             v
         }
@@ -159,22 +150,15 @@ fn main() -> Result<()> {
         }
     };
 
-    // mlockall(MCL_CURRENT | MCL_FUTURE) so the kernel never swaps any
-    // page: Argon2id working set, AES-GCM buffers, HKDF intermediates.
-    // The per-buffer mlock in SecretBytes does not cover third-party
-    // crate allocations; only mlockall does.
-    //
-    // Failure is fatal in release: secrets could otherwise swap to disk.
-    // The operator must grant CAP_IPC_LOCK, configure limits.conf, or
-    // run as root. The FORTIS_ALLOW_NO_MLOCK bypass is debug-only.
+    // mlockall(MCL_CURRENT | MCL_FUTURE) locks the whole address space
+    // against swap, covering Argon2id working set and any third-party
+    // crate allocations the per-buffer mlock in SecretBytes cannot reach.
+    // Fatal in release; the operator must grant CAP_IPC_LOCK, configure
+    // limits.conf, or run as root. SHERD_ALLOW_NO_MLOCK bypass is debug-only.
     #[cfg(unix)]
     {
-        // Track whether mlockall succeeded so the memory module knows
-        // future pages are already covered by MCL_FUTURE and per-buffer
-        // mlock failures can be non-fatal.
         let mut mlockall_ok = false;
         unsafe {
-            // MCL_CURRENT: lock existing pages. MCL_FUTURE: lock future ones.
             let flags = libc::MCL_CURRENT | libc::MCL_FUTURE;
             if libc::mlockall(flags) != 0 {
                 // Likely RLIMIT_MEMLOCK too low. Try raising it, then retry.
@@ -182,64 +166,56 @@ fn main() -> Result<()> {
                 let mut rlim: libc::rlimit = std::mem::zeroed();
                 if libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim) == 0 {
                     let mut new_rlim = rlim;
-                    new_rlim.rlim_cur = rlim.rlim_max; // raise soft to hard
+                    new_rlim.rlim_cur = rlim.rlim_max;
                     if libc::setrlimit(libc::RLIMIT_MEMLOCK, &new_rlim) != 0 {
                         let setrlimit_err = std::io::Error::last_os_error();
                         eprintln!(
-                            "[fortis] WARNING: could not raise RLIMIT_MEMLOCK ({}). \
+                            "[sherd] WARNING: could not raise RLIMIT_MEMLOCK ({}). \
                              Current soft={}, hard={}.",
                             setrlimit_err, rlim.rlim_cur, rlim.rlim_max
                         );
                     }
                 }
-                // Retry mlockall
                 if libc::mlockall(flags) != 0 {
                     let retry_err = std::io::Error::last_os_error();
                     if !allow_no_mlock {
-                        eprintln!("[fortis] FATAL: mlockall failed — secrets could swap to disk.");
+                        eprintln!("[sherd] FATAL: mlockall failed, secrets could swap to disk.");
                         eprintln!(
-                            "[fortis]   Initial error: {} ({:?})",
+                            "[sherd]   Initial error: {} ({:?})",
                             mlockall_err,
                             mlockall_err.kind()
                         );
                         eprintln!(
-                            "[fortis]   Retry error:   {} ({:?})",
+                            "[sherd]   Retry error:   {} ({:?})",
                             retry_err,
                             retry_err.kind()
                         );
-                        eprintln!("[fortis] Memory locking is MANDATORY for this tool.");
-                        eprintln!("[fortis] Fix ONE of:");
-                        eprintln!("[fortis]   1. sudo setcap cap_ipc_lock=ep ./fortis");
-                        eprintln!("[fortis]   2. Add to /etc/security/limits.conf:");
-                        eprintln!("[fortis]        *  soft  memlock  unlimited");
-                        eprintln!("[fortis]        *  hard  memlock  unlimited");
-                        eprintln!("[fortis]      Then log out and back in.");
-                        eprintln!("[fortis]   3. Re-run as root.");
+                        eprintln!("[sherd] Memory locking is required for this tool.");
+                        eprintln!("[sherd] Fix one of:");
+                        eprintln!("[sherd]   sudo setcap cap_ipc_lock=ep ./sherd");
+                        eprintln!("[sherd]   add to /etc/security/limits.conf:");
+                        eprintln!("[sherd]     *  soft  memlock  unlimited");
+                        eprintln!("[sherd]     *  hard  memlock  unlimited");
+                        eprintln!("[sherd]   then log out and back in; or re-run as root.");
                         #[cfg(debug_assertions)]
-                        eprintln!("[fortis]   (DEBUG BUILD: set FORTIS_ALLOW_NO_MLOCK=1 to accept the risk.)");
+                        eprintln!("[sherd]   DEBUG BUILD: set SHERD_ALLOW_NO_MLOCK=1 to accept the risk.");
                         #[cfg(not(debug_assertions))]
                         eprintln!(
-                            "[fortis]   NOTE: this is a RELEASE build; the FORTIS_ALLOW_NO_MLOCK"
+                            "[sherd]   This is a RELEASE build; the SHERD_ALLOW_NO_MLOCK \
+                             bypass is disabled. Use one of the above."
                         );
-                        #[cfg(not(debug_assertions))]
-                        eprintln!(
-                            "[fortis]   bypass is intentionally disabled. Use one of the above."
-                        );
-                        eprintln!("[fortis] Refusing to continue without memory locking.");
-                        // Use exit(2) here because at this point no secret
-                        // buffers exist yet (CLI parsing hasn't happened), so
-                        // skipping Drop is safe. Exit code 2 = security policy.
+                        eprintln!("[sherd] Refusing to continue without memory locking.");
+                        // No secret buffers exist yet, so skipping Drop is safe.
                         std::process::exit(2);
                     } else {
-                        // Debug-build bypass path.
-                        eprintln!("[fortis] WARNING: mlockall failed but FORTIS_ALLOW_NO_MLOCK=1");
+                        eprintln!("[sherd] WARNING: mlockall failed but SHERD_ALLOW_NO_MLOCK=1");
                         eprintln!(
-                            "[fortis]          Error: {} ({:?})",
+                            "[sherd]          Error: {} ({:?})",
                             retry_err,
                             retry_err.kind()
                         );
                         eprintln!(
-                            "[fortis]          Secrets MAY swap to disk. NON-PRODUCTION use only."
+                            "[sherd]          Secrets MAY swap to disk. NON-PRODUCTION use only."
                         );
                     }
                 } else {
@@ -249,9 +225,8 @@ fn main() -> Result<()> {
                 mlockall_ok = true;
             }
         }
-        // Tell the memory module whether MCL_FUTURE is in effect so
-        // per-buffer mlock failures in SecretBytes::try_lock are
-        // non-fatal (already covered) or treated as an accepted bypass.
+        // Let the memory module know whether MCL_FUTURE is in effect so
+        // per-buffer mlock failures in SecretBytes::try_lock can be downgraded.
         if mlockall_ok {
             memory::mark_process_mlockall_active();
         } else if allow_no_mlock {
@@ -270,14 +245,14 @@ fn main() -> Result<()> {
         Command::ShareCombine(args) => cli::cmd_share_combine(args),
         Command::Selftest => match selftest::run_all_selftests() {
             Ok(()) => {
-                println!("✓ All FORTIS v7.3.0 self-tests passed.");
+                println!("✓ All Sherd v1.0.0 self-tests passed.");
                 Ok(())
             }
             Err(e) => Err(e),
         },
         Command::Hash => {
             let hash = selftest::compute_binary_hash()?;
-            println!("FORTIS v7.3.0 binary SHA-256:");
+            println!("Sherd v1.0.0 binary SHA-256:");
             println!("  {}", hash);
             println!();
             println!("Verify this hash out-of-band before trusting the binary.");
@@ -286,16 +261,14 @@ fn main() -> Result<()> {
         }
     };
 
-    // Command handlers return Err on the decrypt-failure path so Drop
-    // impls wipe secrets during unwinding. We print only the top-level
-    // Display message; anyhow's default Termination uses Debug and
-    // would print the full chain, leaking OS strings or paths. Handler
-    // locals are already dropped by here, so exit(1) skipping Drop is
-    // safe.
+    // Handlers return Err on the decrypt-failure path so Drop impls wipe
+    // secrets during unwinding. We print only the top-level Display message;
+    // anyhow's default Termination uses Debug and would print the full
+    // chain. Handler locals are already dropped by here, so exit(1) is safe.
     match result {
         Ok(()) => Ok(()),
         Err(e) => {
-            eprintln!("[fortis] Error: {}", e);
+            eprintln!("[sherd] Error: {}", e);
             std::process::exit(1);
         }
     }

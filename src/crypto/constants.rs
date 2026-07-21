@@ -1,33 +1,21 @@
-//! Fortis v7 protocol constants. Mirrors the browser tool byte-for-byte.
+//! Sherd v1 protocol constants.
 
-// Unix-only. mlock, termios echo control, and 0600 perms have no portable
-// Win32 equivalents; silently compiling on Windows would ship a binary
-// with none of the memory or permission protections.
+// mlock, termios echo, and 0600 perms require a Unix kernel.
 #[cfg(not(unix))]
 compile_error!(
-    "Fortis requires a Unix platform (Linux, macOS, BSD, etc.) for memory locking, \
-     terminal echo control, and secure file permissions. Windows is NOT supported for \
-     production use. If you must run on Windows, use WSL2 or re-audit the entire \
-     codebase for the Win32 equivalents of mlock/mlockall/termios/0600."
+    "Sherd requires a Unix platform for memory locking, terminal echo control, \
+     and 0600 file perms."
 );
-
-// ---------------------------------------------------------------------------
-// Shamir metadata layout
-// ---------------------------------------------------------------------------
-//
-// No K or N values live here. Quorum metadata belongs in shamir.rs and
-// must be HMAC-bound if it is ever added to this file.
 
 // ---------------------------------------------------------------------------
 // Envelope format
 // ---------------------------------------------------------------------------
 
-/// Magic bytes "FRT7" for a Fortis v7 envelope. Public by design; does not
-/// leak plaintext but marks the file as Fortis-encrypted to traffic analysis.
-pub const MAGIC: [u8; 4] = [0x46, 0x52, 0x54, 0x37];
+/// Magic bytes "SHR1" marking a Sherd v1 envelope.
+pub const MAGIC: [u8; 4] = [0x53, 0x48, 0x52, 0x31];
 
-/// Format version. Bumped only on backwards-incompatible changes.
-pub const VERSION: u8 = 7;
+/// Envelope format version.
+pub const VERSION: u8 = 1;
 
 /// Fixed 16-byte header: magic 4, version 1, flags 1, cipher_id 1, kdf_id 1,
 /// commit_id 1, kdf_mem_kib 4, kdf_iters 1, kdf_par 1, slot_count 1.
@@ -46,7 +34,7 @@ pub const FLAG_PARANOID: u8 = 0x02;
 pub const KNOWN_FLAGS: u8 = FLAG_DECOY | FLAG_PARANOID;
 
 // ---------------------------------------------------------------------------
-// Algorithm IDs (cryptographic agility)
+// Algorithm IDs
 // ---------------------------------------------------------------------------
 
 pub const CIPHER_ID_AES256_GCM: u8 = 1;
@@ -71,18 +59,16 @@ pub const MAX_CHUNKS: u32 = 256;
 pub const MAX_CT: usize = MAX_CHUNKS as usize * (CHUNK_SIZE + TAG_LEN); // ~256.004 MiB
 
 // ---------------------------------------------------------------------------
-// KDF presets (mirror the browser tool)
+// KDF presets
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum KdfPreset {
-    /// 64 MiB / 3 passes / 4 lanes. RFC 9106 first recommendation. par=4.
-    /// Files encrypted with par < 4 are rejected at decrypt time.
+    /// 64 MiB / 3 passes / 4 lanes.
     Standard,
-    /// 128 MiB / 4 passes / 4 lanes. Between RFC 9106 first and second.
+    /// 128 MiB / 4 passes / 4 lanes.
     Paranoid,
-    /// 256 MiB / 5 passes / 4 lanes. Close to RFC 9106 second recommendation
-    /// with par=4.
+    /// 256 MiB / 5 passes / 4 lanes.
     Extreme,
 }
 
@@ -115,34 +101,29 @@ pub struct KdfParams {
     pub par: u32,
 }
 
-// KDF minimums prevent downgrade attacks via crafted .frts headers.
-// RFC 9106 first recommendation is the floor: 64 MiB, 3 iters, par 4.
-// KDF_MEM_MAX caps allocations to 256 MiB so a hostile file cannot OOM
-// the decryptor. par=4 raises brute-force cost on multi-core hardware.
-pub const KDF_MEM_MIN: u32 = 65_536; // 64 MiB, RFC 9106 first
-pub const KDF_MEM_MAX: u32 = 262_144; // 256 MiB, matches KdfPreset::Extreme
-pub const KDF_ITERS_MIN: u32 = 3; // RFC 9106 first
-pub const KDF_ITERS_MAX: u32 = 5; // matches KdfPreset::Extreme
-pub const KDF_PAR_MIN: u32 = 4; // RFC 9106 first
-pub const KDF_PAR_MAX: u32 = 4; // matches highest preset
+pub const KDF_MEM_MIN: u32 = 65_536; // 64 MiB
+pub const KDF_MEM_MAX: u32 = 262_144; // 256 MiB
+pub const KDF_ITERS_MIN: u32 = 3;
+pub const KDF_ITERS_MAX: u32 = 5;
+pub const KDF_PAR_MIN: u32 = 4;
+pub const KDF_PAR_MAX: u32 = 4;
 
 // ---------------------------------------------------------------------------
-// HKDF info strings (domain separation)
+// HKDF info strings
 // ---------------------------------------------------------------------------
 
-pub const HKDF_INFO_COMMIT: &[u8] = b"fortis-v7/commit";
-pub const HKDF_INFO_CHUNK_PREFIX: &[u8] = b"fortis-v7/chunk/";
+pub const HKDF_INFO_COMMIT: &[u8] = b"sherd-v1/commit";
+pub const HKDF_INFO_CHUNK_PREFIX: &[u8] = b"sherd-v1/chunk/";
 
 // ---------------------------------------------------------------------------
 // Armor labels
 // ---------------------------------------------------------------------------
 
-pub const ARMOR_MSG: &str = "FORTIS MESSAGE";
+pub const ARMOR_MSG: &str = "SHERD MESSAGE";
 #[allow(dead_code)]
-pub const ARMOR_FILE: &str = "FORTIS FILE";
-/// ASCII armor label for Shamir share files. Fixed string; does not encode
-/// K or N.
-pub const ARMOR_SHARE: &str = "FORTIS SHARE";
+pub const ARMOR_FILE: &str = "SHERD FILE";
+/// ASCII armor label for Shamir share files.
+pub const ARMOR_SHARE: &str = "SHERD SHARE";
 
 // ---------------------------------------------------------------------------
 // Minimum passphrase length

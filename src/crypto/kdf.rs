@@ -14,13 +14,7 @@ use zeroize::Zeroize;
 pub const HKDF_SHA256_MAX_LEN: usize = 255 * 32;
 
 /// Argon2id master key from a passphrase. Returns 32 bytes in `SecretBytes`.
-///
-/// `mem_kib`, `iters`, `par` are the Argon2 costs. The selftest bypasses
-/// this function to call argon2 directly with weaker params; that is the
-/// only caller allowed below the production floor.
-///
-/// All-zero salt is rejected. The argon2 crate's `zeroize` feature wipes
-/// the 64-256 MiB internal scratch on drop; keep it enabled.
+/// `mem_kib`, `iters`, `par` are the Argon2 costs. All-zero salt is rejected.
 pub(crate) fn argon2id_master(
     passphrase: &[u8],
     salt: &[u8; SALT_LEN],
@@ -28,9 +22,7 @@ pub(crate) fn argon2id_master(
     iters: u32,
     par: u32,
 ) -> Result<SecretBytes> {
-    // Uniform "bad" error. An attacker planting a .frts file controls the
-    // KDF params via the slot header; distinct error strings would let them
-    // probe bounds and tell "malformed file" from "wrong passphrase".
+    // Uniform error; do not reveal which check failed.
     if !(KDF_MEM_MIN..=KDF_MEM_MAX).contains(&mem_kib)
         || !(KDF_ITERS_MIN..=KDF_ITERS_MAX).contains(&iters)
         || !(KDF_PAR_MIN..=KDF_PAR_MAX).contains(&par)
@@ -38,15 +30,13 @@ pub(crate) fn argon2id_master(
         bail!("bad");
     }
 
-    // Reject all-zero salt. rng::fill already rejects zero output, but a
-    // caller could pass one directly. Constant-time OR scan.
+    // Reject all-zero salt.
     let mut salt_acc: u8 = 0;
     for b in salt.iter() {
         salt_acc |= *b;
     }
     if salt_acc == 0 {
-        // Uniform error message — do not reveal that the salt was zero
-        // (which could leak information to an adversary observing errors).
+        // Uniform error; do not reveal the salt was zero.
         bail!("bad");
     }
 
@@ -57,18 +47,15 @@ pub(crate) fn argon2id_master(
     argon
         .hash_password_into(passphrase, salt, &mut out)
         .map_err(|_| anyhow::anyhow!("bad"))?;
-    // The argon2 crate's zeroize feature wipes its scratchpad when `argon`
-    // drops here. Keep the feature flag enabled in Cargo.toml.
     Ok(out)
 }
 
 /// HKDF-Extract: PRK = HMAC-SHA256(salt, IKM). Returns 32 bytes in
-/// `SecretBytes`. Output length is asserted to catch a future hash swap.
+/// `SecretBytes`.
 pub(crate) fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<SecretBytes> {
     // extract returns (PRK, ()) for SHA-256; no error path.
     let (mut prk, _unit) = Hkdf::<Sha256>::extract(Some(salt), ikm);
-    // Move the PRK into SecretBytes and wipe the on-stack GenericArray
-    // before returning so the 32 bytes do not linger on the caller's frame.
+    // Wipe the on-stack PRK before returning.
     let prk_len = prk.as_slice().len();
     debug_assert_eq!(
         prk_len, 32,
@@ -83,9 +70,8 @@ pub(crate) fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<SecretBytes> {
     Ok(result)
 }
 
-/// HKDF-Expand: derive `length` bytes from PRK with `info`. Returns a
-/// `SecretBytes` of exactly `length` bytes. RFC 5869 length limit and
-/// `prk.len() >= 32` are enforced. Zero-length is rejected as a caller bug.
+/// HKDF-Expand: derive `length` bytes from PRK with `info`. Enforces the
+/// RFC 5869 length limit and `prk.len() >= 32`.
 pub(crate) fn hkdf_expand(prk: &[u8], info: &[u8], length: usize) -> Result<SecretBytes> {
     if length == 0 {
         bail!("bad");
@@ -105,8 +91,8 @@ pub(crate) fn hkdf_expand(prk: &[u8], info: &[u8], length: usize) -> Result<Secr
     Ok(result)
 }
 
-/// Per-chunk AEAD key via HKDF-Expand. `info` binds both `chunk_index`
-/// and `chunk_count` so keys from different-sized files cannot collide.
+/// Per-chunk AEAD key via HKDF-Expand. `info` binds `chunk_index` and
+/// `chunk_count`.
 pub(crate) fn derive_chunk_key(
     prk: &[u8],
     chunk_index: u32,
@@ -152,7 +138,6 @@ pub(crate) fn derive_slot_secrets_from_secret(
     par: u32,
 ) -> Result<(SecretBytes, SecretBytes)> {
     let master = argon2id_master(passphrase.as_bytes(), salt, mem_kib, iters, par)?;
-    // Wipe passphrase now that Argon2id is done.
     passphrase.wipe();
     drop(passphrase);
     let prk = hkdf_extract(salt, &master)?;

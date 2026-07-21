@@ -1,9 +1,8 @@
-//! Fortis v7 binary envelope format.
+//! Sherd v1 binary envelope format.
 //!
-//! Fixed 16-byte header, then N slots. Each slot is salt + iv + commit_tag
-//! + chunk_count + ct_total_len + ciphertext. Ciphertext is a stream of
-//! AES-256-GCM chunks. Header bytes are bound as AEAD AAD and into the
-//! commit tag.
+//! 16-byte header followed by N slots. Each slot carries salt, IV, commit
+//! tag, chunk count, total ciphertext length, and a stream of AES-256-GCM
+//! chunks. Header bytes feed the AEAD AAD and the commit tag.
 #![allow(clippy::doc_lazy_continuation)]
 
 use crate::crypto::aead;
@@ -23,7 +22,7 @@ use zeroize::Zeroizing;
 /// Typed envelope error: "already encrypted" vs generic failure.
 #[derive(Debug)]
 pub enum EnvelopeError {
-    /// Input already looks like a Fortis envelope. Caller can offer `--force`.
+    /// Input already looks like a Sherd envelope. Caller can pass --force.
     InputAlreadyEncrypted,
     /// Generic envelope error. Uniform "bad" message.
     #[allow(dead_code)]
@@ -35,7 +34,7 @@ impl std::fmt::Display for EnvelopeError {
         match self {
             EnvelopeError::InputAlreadyEncrypted => write!(
                 f,
-                "input appears to already be a FORTIS envelope; \
+                "input appears to already be a SHERD envelope; \
                  refusing to re-encrypt (use --force to override)"
             ),
             EnvelopeError::Bad => write!(f, "bad"),
@@ -45,9 +44,9 @@ impl std::fmt::Display for EnvelopeError {
 
 impl std::error::Error for EnvelopeError {}
 
-/// True if input begins with the `"FRT7"` magic. Guards against re-encrypting
-/// an existing envelope.
-pub fn is_fortis_envelope(input: &[u8]) -> bool {
+/// True if input begins with the `"SHR1"` magic. Blocks re-encrypting an
+/// existing envelope.
+pub fn is_sherd_envelope(input: &[u8]) -> bool {
     input.len() >= MAGIC.len() && input[..MAGIC.len()] == MAGIC
 }
 
@@ -337,7 +336,7 @@ fn unpad_plaintext_ct(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     // Safe init; Zeroizing wipes the buffer including truncated tail on drop.
     let max_pt_len = padded.len() - 4;
     let mut out: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; max_pt_len]);
-    // Copy the maximum possible plaintext length (data-independent size).
+    // Copy the maximum possible plaintext length. Size is data-independent.
     out.copy_from_slice(&padded[4..4 + max_pt_len]);
     out.truncate(len);
     Ok(out)
@@ -522,8 +521,8 @@ pub fn encrypt_slot(
     })
 }
 
-/// Encrypt a plaintext into a Fortis envelope. Refuses to re-encrypt an
-/// input that already begins with the FRT7 magic. Use `encrypt_envelope_force`
+/// Encrypt a plaintext into a Sherd envelope. Refuses to re-encrypt an
+/// input that already begins with the SHR1 magic. Use `encrypt_envelope_force`
 /// to override.
 pub fn encrypt_envelope(
     plaintext: &[u8],
@@ -534,7 +533,7 @@ pub fn encrypt_envelope(
     paranoid: bool,
 ) -> Result<Vec<u8>> {
     // Refuse recursive encryption via the 4-byte magic check.
-    if is_fortis_envelope(plaintext) {
+    if is_sherd_envelope(plaintext) {
         return Err(EnvelopeError::InputAlreadyEncrypted.into());
     }
     encrypt_envelope_impl(

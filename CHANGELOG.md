@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [7.3.0] - 2026-07-21
+## [1.0.0] - 2026-07-21
 
 ### Added
 
@@ -21,10 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recursive-encryption check.
 - `--pass-fd`, `--pass-file`, and `--decoy-pass-fd`/`--decoy-pass-file`
   options for non-interactive passphrase input.
-- `fortis selftest` command runs Argon2id, HKDF-SHA256, HMAC-SHA256,
+- `sherd selftest` command runs Argon2id, HKDF-SHA256, HMAC-SHA256,
   AES-256-GCM known-answer tests plus round-trip and tamper-rejection
   tests.
-- `fortis hash` command prints the SHA-256 of the running binary for
+- `sherd hash` command prints the SHA-256 of the running binary for
   out-of-band verification.
 - Uniform-timing decryption: every chunk of every slot is processed
   regardless of commit-tag match, closing the timing side-channel that
@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconstructed secret) are wrapped in `Zeroizing<…>` and wiped on
   drop.
 - `mlockall(MCL_CURRENT | MCL_FUTURE)` is mandatory in release builds.
-  The `FORTIS_ALLOW_NO_MLOCK` environment variable is honored only in
+  The `SHERD_ALLOW_NO_MLOCK` environment variable is honored only in
   debug builds (with a loud warning); in release builds the variable
   is rejected before `mlockall` runs.
 - Core dumps are disabled process-wide via `setrlimit(RLIMIT_CORE, 0)`
@@ -72,8 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Closed decoy size leak: both slots are padded to the same randomized
   target length.
 - Closed recursive-encryption footgun: `encrypt_envelope` refuses
-  input that begins with the `FRT7` magic unless `--force` is given.
-- Closed memory-protection bypass: `FORTIS_ALLOW_NO_MLOCK` is no
+  input that begins with the `SHR1` magic unless `--force` is given.
+- Closed memory-protection bypass: `SHERD_ALLOW_NO_MLOCK` is no
   longer honored in release builds.
 - Closed TOCTOU on input files: `open_and_read_bounded` opens the
   file once, fstats the fd, and reads from the same fd.

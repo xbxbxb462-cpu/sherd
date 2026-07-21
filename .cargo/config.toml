@@ -1,7 +1,7 @@
-# Build configuration for FORTIS.
+# Build configuration for SHERD.
 #
 # The rustflags below strip developer-machine paths and cargo registry
-# structure from the compiled binary so that `strings fortis | grep /home/`
+# structure from the compiled binary so that `strings sherd | grep /home/`
 # returns nothing. This prevents an adversary who obtains the binary from
 # learning the developer's home directory, OS username, or exact dependency
 # versions via the registry folder names (e.g. `argon2-0.5.3`).
@@ -29,7 +29,7 @@
 #     the ciphertext format, tag length, and KDF cost.
 #
 # To verify after a release build:
-#   strings target/release/fortis | grep -iE '(/home/|/Users/|cargo/registry)'
+#   strings target/release/sherd | grep -iE '(/home/|/Users/|cargo/registry)'
 #   # Expected: no output
 
 [build]
@@ -57,7 +57,7 @@ rustflags = [
     # 5. Hide the rustup toolchain root (covers std library paths).
     "--remap-path-prefix=/home/z/.rustup=./rustup",
     # 6. Hide the project's absolute path.
-    "--remap-path-prefix=/home/z/my-project/fortis_project=./src",
+    "--remap-path-prefix=/home/z/my-project/sherd_project=./src",
     # 7. Finally, hide the developer's home directory entirely (catch-all
     #    for anything not matched above).
     "--remap-path-prefix=/home/z=.",

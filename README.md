@@ -1,6 +1,6 @@
-# Fortis
+# Sherd
 
-A paranoid-grade, single-binary offline encryption tool. Fortis encrypts
+A paranoid-grade, single-binary offline encryption tool. Sherd encrypts
 messages and files with **AES-256-GCM** using a key derived from your
 passphrase via **Argon2id** and **HKDF-SHA256**. It supports
 **plausible deniability** through an indistinguishable decoy slot,
@@ -10,7 +10,7 @@ buffers — including plaintext — are zeroized on drop, the entire
 process address space is locked against swap via `mlockall`, and core
 dumps are disabled.
 
-> Fortis targets Unix platforms (Linux, macOS, BSD). Windows is not
+> Sherd targets Unix platforms (Linux, macOS, BSD). Windows is not
 > supported; use WSL2 if you must run on Windows.
 
 ## Features
@@ -44,7 +44,7 @@ dumps are disabled.
   and wiped on drop. `mlockall(MCL_CURRENT | MCL_FUTURE)` locks the
   whole process against swap. `prctl(PR_SET_DUMPABLE, 0)` and
   `setrlimit(RLIMIT_CORE, 0)` disable core dumps.
-- **Self-tests** — `fortis selftest` runs known-answer tests
+- **Self-tests** — `sherd selftest` runs known-answer tests
   (Argon2id, HKDF-SHA256, HMAC-SHA256, AES-256-GCM) and round-trip /
   tamper-rejection tests before you trust the binary in a sensitive
   environment.
@@ -54,19 +54,19 @@ dumps are disabled.
 From source (requires Rust 1.74+):
 
 ```sh
-git clone https://github.com/fortis/fortis.git
-cd fortis
+git clone https://github.com/sherd/sherd.git
+cd sherd
 cargo install --path .
 ```
 
-The binary is installed as `fortis` in your Cargo bin directory
+The binary is installed as `sherd` in your Cargo bin directory
 (usually `~/.cargo/bin`).
 
 For production use, grant the binary `CAP_IPC_LOCK` so it can lock
 memory against swap without running as root:
 
 ```sh
-sudo setcap cap_ipc_lock=ep $(which fortis)
+sudo setcap cap_ipc_lock=ep $(which sherd)
 ```
 
 Alternatively, raise the `memlock` rlimit in
@@ -82,7 +82,7 @@ Alternatively, raise the `memlock` rlimit in
 ### Encrypt a message (stdin → stdout, ASCII-armored)
 
 ```sh
-echo "top secret" | fortis encrypt --kdf standard > message.frts.asc
+echo "top secret" | sherd encrypt --kdf standard > message.shrd.asc
 ```
 
 You will be prompted for a passphrase (minimum 12 characters).
@@ -90,30 +90,30 @@ You will be prompted for a passphrase (minimum 12 characters).
 ### Decrypt a message
 
 ```sh
-fortis decrypt -i message.frts.asc -o plaintext.txt
+sherd decrypt -i message.shrd.asc -o plaintext.txt
 ```
 
-### Encrypt a file (binary envelope, `.frts` extension)
+### Encrypt a file (binary envelope, `.shrd` extension)
 
 ```sh
-fortis encrypt-file -i report.pdf
-# → report.pdf.frts
+sherd encrypt-file -i report.pdf
+# → report.pdf.shrd
 ```
 
 ### Decrypt a file
 
 ```sh
-fortis decrypt-file -i report.pdf.frts -o report.pdf
+sherd decrypt-file -i report.pdf.shrd -o report.pdf
 ```
 
 ### Encrypt with a decoy (plausible deniability)
 
 ```sh
-fortis encrypt \
+sherd encrypt \
   --decoy decoy.txt \
   --decoy-pass-file decoy-pass.txt \
   --pass-file real-pass.txt \
-  -i real.txt -o real.frts.asc
+  -i real.txt -o real.shrd.asc
 ```
 
 Under coercion, reveal `decoy-pass.txt` to "decrypt" `decoy.txt`. The
@@ -122,16 +122,16 @@ two slots are indistinguishable from ciphertext alone.
 ### Split a secret with Shamir (3-of-5)
 
 ```sh
-fortis share-split -i master.key -k 3 -n 5 > shares.txt
+sherd share-split -i master.key -k 3 -n 5 > shares.txt
 ```
 
-Distribute each `=== FORTIS Share ===` block to a separate holder
+Distribute each `=== SHERD Share ===` block to a separate holder
 over a separate channel.
 
 ### Reconstruct a secret
 
 ```sh
-fortis share-combine -k 3 -s share1.txt -s share2.txt -s share3.txt -o master.key
+sherd share-combine -k 3 -s share1.txt -s share2.txt -s share3.txt -o master.key
 ```
 
 The threshold `-k` is supplied by the caller; it is **not** stored in
@@ -143,11 +143,11 @@ For non-interactive use, prefer file descriptors (never appear in
 `/proc/PID/cmdline`):
 
 ```sh
-fortis encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.frts
+sherd encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.shrd
 ```
 
 `--pass-file <path>` is also supported (the path appears in cmdline,
-but the passphrase does not). The `FORTIS_PASS` environment variable
+but the passphrase does not). The `SHERD_PASS` environment variable
 is supported as a CI/testing convenience **with a loud warning**: on
 Linux it remains visible in `/proc/PID/environ` for the entire
 process lifetime.
@@ -155,23 +155,23 @@ process lifetime.
 ### Verify the binary
 
 ```sh
-fortis hash
-fortis selftest
+sherd hash
+sherd selftest
 ```
 
-`fortis hash` prints the SHA-256 of the running binary so you can
-verify it out-of-band. `fortis selftest` runs the cryptographic
+`sherd hash` prints the SHA-256 of the running binary so you can
+verify it out-of-band. `sherd selftest` runs the cryptographic
 known-answer tests.
 
 ## Security notes
 
-- **Threat model.** Fortis defends against ciphertext-only attackers,
+- **Threat model.** Sherd defends against ciphertext-only attackers,
   header tampering, commit-tag forgery, chunk compromise, nonce reuse,
   timing oracles, coercion (via the decoy layer), and memory forensics.
   It does **not** defend against a compromised OS or hardware
   implant — for that, use an air-gapped machine running Tails OS.
 - **Memory locking is mandatory in release builds.** The
-  `FORTIS_ALLOW_NO_MLOCK` environment variable is honored only in
+  `SHERD_ALLOW_NO_MLOCK` environment variable is honored only in
   debug builds (with a loud warning). In release builds, the variable
   is rejected before `mlockall` runs.
 - **KDF minimums are enforced.** Argon2id parameters are bounded to
@@ -179,8 +179,8 @@ known-answer tests.
   lanes. Files encrypted with weaker parameters are rejected at
   decryption time.
 - **No recursive encryption.** Re-encrypting an already-encrypted
-  file is an operational footgun. `fortis encrypt` refuses input that
-  begins with the `FRT7` magic unless you pass `--force`.
+  file is an operational footgun. `sherd encrypt` refuses input that
+  begins with the `SHR1` magic unless you pass `--force`.
 - **Constant-time operations.** Secret comparisons use
   `subtle::ConstantTimeEq`. GF(256) arithmetic (used by Shamir) is
   branchless.

@@ -1,12 +1,8 @@
 //! Shamir Secret Sharing over GF(256), branchless and constant-time.
 //!
-//! Fewer than K shares reveal nothing. K and N are not stored in the
-//! share; K is supplied to `combine()` by the caller.
-//!
-//! Share format (v2, 4098 bytes): `[VERSION(1) | x(1) | secret_len(2 BE)
-//! | secret(L) | zero_pad(P) | sha256(...)(32)]`. The digest covers
-//! everything except itself, so tampering is detected even with exactly
-//! K shares.
+//! Share format (v2): `[VERSION(1) | x(1) | secret_len(2 BE) | secret(L)
+//! | zero_pad(P) | sha256(...)(32)]`. The digest covers everything
+//! except itself. K and N are not stored; K is supplied to `combine()`.
 
 use crate::crypto::rng;
 use anyhow::{bail, Result};
@@ -23,7 +19,7 @@ pub const SHARE_HEADER_LEN: usize = 2;
 /// SHA-256 digest length.
 const HASH_LEN: usize = 32;
 
-/// Length of the `secret_len` field (u16 big-endian, 2 bytes).
+/// Length of the `secret_len` field: u16 big-endian, 2 bytes.
 const LEN_FIELD_LEN: usize = 2;
 
 /// Fixed payload size for every share.
@@ -106,7 +102,7 @@ fn ct_eq_u8(a: &[u8], b: &[u8]) -> u8 {
 /// SHA-256 digest).
 ///
 /// Constraints: `secret.len() <= MAX_SECRET_LEN` (4062), `2 <= k <= n <= 10`.
-/// Returns a uniform `Err("bad")` on any invalid input (no oracle).
+/// Returns a uniform `Err("bad")` on any invalid input; no oracle.
 pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
     if !(2..=10).contains(&k) || !(k..=10).contains(&n) {
         bail!("bad");
@@ -115,7 +111,7 @@ pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
         bail!("bad");
     }
 
-    // Payload layout: secret_len (u16 BE), secret, zero pad, SHA-256.
+    // Payload layout: secret_len u16 BE, secret, zero pad, SHA-256.
     let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; SHARE_PAYLOAD_BYTES]);
     let slen = secret.len() as u16;
     payload[0] = (slen >> 8) as u8;
@@ -218,12 +214,12 @@ pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
 
 /// Reconstruct the secret from `shares` via Lagrange interpolation in
 /// GF(256). Requires at least `k_expected` shares; K is supplied by the
-/// caller (the share header does not carry it).
+/// caller; the share header does not carry it.
 ///
 /// Returns `Err("bad")` on any failure: malformed shares, duplicate x,
-/// wrong K, or tampering (detected via the SHA-256 digest with exactly K
-/// shares, or the consistency check with > K shares). The returned
-/// secret is wrapped in `Zeroizing<Vec<u8>>`.
+/// wrong K, or tampering. Tampering is caught by the SHA-256 digest when
+/// exactly K shares are given, or by the consistency check otherwise.
+/// The returned secret is wrapped in `Zeroizing<Vec<u8>>`.
 pub fn combine(shares: &[Vec<u8>], k_expected: u8) -> Result<Zeroizing<Vec<u8>>> {
     if shares.is_empty() {
         bail!("bad");
@@ -482,8 +478,8 @@ mod tests {
 
         for s in shares_k3.iter().chain(shares_k5.iter()) {
             assert_eq!(s[0], SHARE_FORMAT_VERSION);
-            // x is a u8 in [1, 255] (0 is forbidden — it would leak the secret
-            // as the polynomial's constant term).
+            // x is a u8 in [1, 255]. x=0 is the polynomial's constant term,
+            // which is the secret itself.
             assert!(s[1] >= 1);
         }
 
@@ -563,7 +559,7 @@ mod tests {
         let mut short = shares[0].clone();
         short.truncate(10);
         assert!(combine(&[short, shares[1].clone(), shares[2].clone()], 3).is_err());
-        // Too long (trailing bytes appended).
+        // Too long; trailing bytes appended.
         let mut long = shares[0].clone();
         long.push(0xFF);
         assert!(combine(&[long, shares[1].clone(), shares[2].clone()], 3).is_err());

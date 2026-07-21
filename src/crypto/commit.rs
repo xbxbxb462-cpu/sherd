@@ -1,14 +1,12 @@
 //! Key commitment (HMAC-SHA256-truncated).
 //!
-//! commit_tag = HMAC-SHA256(commitKey, "FORTIS-v7-commit-tag\x00"
+//! commit_tag = HMAC-SHA256(commitKey, "SHERD-v1-commit-tag\x00"
 //!                          || fixed_header || salt || base_iv
 //!                          || chunk_count || ct_total_len
 //!                          || ct_first_chunk_hash)[0..15]
 //!
-//! The commit tag is verified before any plaintext is released. For
-//! uniform-timing reasons `decrypt_stream` always runs regardless of
-//! commit_ok, but the commit tag is what determines whether the result
-//! is ACCEPTED.
+//! Verified before any plaintext is released. `decrypt_stream` always
+//! runs for uniform timing, but the commit tag decides ACCEPT vs reject.
 
 use crate::crypto::constants::*;
 use anyhow::{bail, Result};
@@ -25,7 +23,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// usage in the codebase (HKDF-Extract, HKDF-Expand both use HMAC-SHA256
 /// internally with different keys, but explicit domain separation is
 /// defense in depth).
-const COMMIT_TAG_DOMAIN_SEP: &[u8] = b"FORTIS-v7-commit-tag\x00";
+const COMMIT_TAG_DOMAIN_SEP: &[u8] = b"SHERD-v1-commit-tag\x00";
 
 /// Compute the 16-byte commitment tag.
 ///
@@ -123,7 +121,7 @@ pub(crate) fn compute_commit_tag(
 /// HMAC binding the hash into the authenticated data.
 pub(crate) fn compute_first_chunk_hash(first_chunk_ct: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"FORTIS-v7-first-chunk-hash\x00"); // domain separation
+    hasher.update(b"SHERD-v1-first-chunk-hash\x00");
     hasher.update(first_chunk_ct);
     // The `sha2` 0.10 crate does not expose a `zeroize` feature, so the
     // internal Sha256 state (8 × u32 working state + 64-byte block buffer

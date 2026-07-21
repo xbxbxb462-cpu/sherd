@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the latest released version of Fortis receives security updates.
+Only the latest released version of Sherd receives security updates.
 If you are running an older version, upgrade before reporting an
 issue.
 
@@ -15,15 +15,15 @@ Instead, report vulnerabilities privately:
 
 1. Open a new **GitHub Security Advisory** via the
    "Security" → "Advisories" → "Report a vulnerability" tab on the
-   Fortis repository, **or**
-2. Email the maintainers directly at `security@fortis.invalid` (PGP
+   Sherd repository, **or**
+2. Email the maintainers directly at `security@sherd.invalid` (PGP
    key fingerprint published in the repository root as
    `SECURITY-PGP.asc` if available).
 
 Please include the following in your report, where applicable:
 
 - A description of the issue and its impact.
-- The exact Fortis version (`fortis --version`) and how it was built
+- The exact Sherd version (`sherd --version`) and how it was built
   (`cargo build --release` flags, target platform, Rust toolchain
   version).
 - A minimal reproducer (commands, input files, expected vs. actual
@@ -37,7 +37,7 @@ acknowledgment, extendable on request).
 
 ## Threat model
 
-Fortis is designed to defend against:
+Sherd is designed to defend against:
 
 - Ciphertext-only attackers (throttled by Argon2id memory-hard cost).
 - Header tampering (every header byte is AEAD AAD AND commit-tag input).
@@ -50,7 +50,7 @@ Fortis is designed to defend against:
 - Memory forensics (`zeroize` on every secret buffer; `mlock` on keys;
   `mlockall` on the whole process).
 
-Fortis does **not** defend against:
+Sherd does **not** defend against:
 
 - A compromised OS or hardware implant. Use an air-gapped machine
   running Tails OS for the highest-sensitivity operations.
@@ -66,16 +66,16 @@ Fortis does **not** defend against:
 - Build with `cargo build --release` (the release profile enables LTO,
   panic=abort, and strips symbols).
 - Grant the binary `CAP_IPC_LOCK`:
-  `sudo setcap cap_ipc_lock=ep ./fortis`.
+  `sudo setcap cap_ipc_lock=ep ./sherd`.
 - Run on a system with `RLIMIT_MEMLOCK` raised to unlimited (see
   `/etc/security/limits.conf`) or as root.
-- Run `fortis selftest` once after install and verify the SHA-256 of
-  the binary out-of-band (`fortis hash`).
-- Do **not** set `FORTIS_ALLOW_NO_MLOCK` in release builds — the
+- Run `sherd selftest` once after install and verify the SHA-256 of
+  the binary out-of-band (`sherd hash`).
+- Do **not** set `SHERD_ALLOW_NO_MLOCK` in release builds — the
   binary will refuse to start if the variable is present at all.
 - For interactive use, prefer the passphrase prompt. For scripting,
   prefer `--pass-fd N` (file descriptor) over `--pass-file` or
-  `FORTIS_PASS`.
+  `SHERD_PASS`.
 
 ## Cryptographic primitives
 
@@ -90,7 +90,7 @@ Fortis does **not** defend against:
 
 ## Dependency audit
 
-Fortis uses the following audited cryptographic crates:
+Sherd uses the following audited cryptographic crates:
 
 - `aes-gcm` 0.10 — audited by NCC Group in 2020.
 - `argon2` 0.5 — RustCrypto implementation.

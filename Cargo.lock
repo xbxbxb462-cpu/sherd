@@ -257,26 +257,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fortis"
-version = "7.3.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "base64ct",
- "clap",
- "hkdf",
- "hmac",
- "libc",
- "rand",
- "rand_core",
- "sha2",
- "subtle",
- "tempfile",
- "zeroize",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,6 +475,26 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sherd"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "base64ct",
+ "clap",
+ "hkdf",
+ "hmac",
+ "libc",
+ "rand",
+ "rand_core",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]

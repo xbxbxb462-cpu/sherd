@@ -12,7 +12,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "=== Building fortis (release, sanitized) ==="
+echo "=== Building sherd (release, sanitized) ==="
 
 # Force a clean rebuild so old object files (which may contain un-remapped
 # paths from a previous build) do not pollute the final binary.
@@ -44,7 +44,7 @@ export SOURCE_DATE_EPOCH=0
 echo "=== cargo build --release ==="
 cargo build --release
 
-BINARY="target/release/fortis"
+BINARY="target/release/sherd"
 
 echo ""
 echo "=== Strip symbols (defensive — strip= already set in Cargo.toml) ==="

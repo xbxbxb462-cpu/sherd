@@ -1,7 +1,6 @@
 //! Cryptographic self-tests: KATs, round-trips, tamper rejection.
 //!
-//! Run `fortis selftest` before trusting the binary in a sensitive
-//! environment.
+//! Run `sherd selftest` before trusting this binary.
 
 use crate::armor;
 use crate::crypto::aead;
@@ -18,7 +17,7 @@ use std::io::{self, Read, Write};
 const KAT_AESGCM_EMPTY_TAG_HEX: &str = "530f8afbc74536b9a963b4f1c4cb738b";
 
 /// Argon2id KAT: 1 MiB, 3 iters, 1 lane.
-const KAT_ARGON2ID_HEX: &str = "7be8b45c4cd94a4b7cb5e4cb7700745673c63ca74e52479f0fa16d9b84aa25a8";
+const KAT_ARGON2ID_HEX: &str = "71c7e08979b7a21e58ba5fcd9f2700b8fe45992540023533f650ed7228a37d39";
 
 /// HKDF-SHA256 RFC 5869 TC1.
 const KAT_HKDF_RFC5869_TC1_HEX: &str =
@@ -69,7 +68,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
 }
 
 pub fn run_all_selftests() -> Result<()> {
-    println!("FORTIS v7.3.0 Cryptographic Self-Tests");
+    println!("SHERD v1.0.0 Cryptographic Self-Tests");
     println!("==========================================");
     let mut passed = 0;
     let mut failed = 0;
@@ -95,12 +94,12 @@ pub fn run_all_selftests() -> Result<()> {
     test!("argon2id KAT", {
         // KAT params: 1 MiB, 3 iters, 1 lane.
         use argon2::{Algorithm, Argon2, Params, Version};
-        let salt = *b"fortis-v7-kat-salt-32-bytes!!!!!";
+        let salt = *b"sherd-v1-kat-salt-32-bytes!!!!!";
         let params = Params::new(1024, 3, 1, Some(32)).map_err(|_| anyhow::anyhow!("bad"))?;
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
         let mut out = [0u8; 32];
         argon
-            .hash_password_into(b"fortis-v7-kat-password", &salt, &mut out)
+            .hash_password_into(b"sherd-v1-kat-password", &salt, &mut out)
             .map_err(|_| anyhow::anyhow!("bad"))?;
         let got = hex_encode(&out);
         if got != KAT_ARGON2ID_HEX {
@@ -113,7 +112,7 @@ pub fn run_all_selftests() -> Result<()> {
         Ok(())
     });
 
-    // Smoke at production params (64 MiB): deterministic, non-zero output.
+    // Smoke at production params, 64 MiB. Deterministic, non-zero output.
     test!("argon2id at production params", {
         use argon2::{Algorithm, Argon2, Params, Version};
         let salt = [0xAAu8; SALT_LEN];
@@ -863,7 +862,7 @@ pub fn run_all_selftests() -> Result<()> {
     test!("armor rejects mismatched labels", {
         let data = b"test";
         let armored = armor::armor(ARMOR_MSG, data);
-        let tampered = armored.replace("BEGIN FORTIS MESSAGE", "BEGIN FORTIS SHARE");
+        let tampered = armored.replace("BEGIN SHERD MESSAGE", "BEGIN SHERD SHARE");
         match armor::dearmor(&tampered) {
             Ok(_) => bail!("armor parser accepted mismatched labels"),
             Err(_) => Ok(()),
@@ -893,7 +892,7 @@ pub fn run_all_selftests() -> Result<()> {
     // "AC==" is non-canonical: the bottom 4 bits of 'C' are nonzero, per
     // RFC 4648 §3.3.
     test!("armor rejects non-canonical padding", {
-        let non_canonical = "-----BEGIN FORTIS MESSAGE-----\nAC==\n-----END FORTIS MESSAGE-----\n";
+        let non_canonical = "-----BEGIN SHERD MESSAGE-----\nAC==\n-----END SHERD MESSAGE-----\n";
         match armor::dearmor(non_canonical) {
             Ok(_) => bail!("armor parser accepted non-canonical base64"),
             Err(_) => Ok(()),
@@ -901,7 +900,7 @@ pub fn run_all_selftests() -> Result<()> {
     });
 
     test!("armor rejects mid-stream padding", {
-        let mid_pad = "-----BEGIN FORTIS MESSAGE-----\nAB=C\n-----END FORTIS MESSAGE-----\n";
+        let mid_pad = "-----BEGIN SHERD MESSAGE-----\nAB=C\n-----END SHERD MESSAGE-----\n";
         match armor::dearmor(mid_pad) {
             Ok(_) => bail!("armor parser accepted mid-stream padding"),
             Err(_) => Ok(()),
@@ -912,8 +911,8 @@ pub fn run_all_selftests() -> Result<()> {
         let data = b"test";
         let armored = armor::armor(ARMOR_MSG, data);
         let tampered = armored
-            .replace("BEGIN FORTIS MESSAGE", "BEGIN FORTIS UNKNOWN")
-            .replace("END FORTIS MESSAGE", "END FORTIS UNKNOWN");
+            .replace("BEGIN SHERD MESSAGE", "BEGIN SHERD UNKNOWN")
+            .replace("END SHERD MESSAGE", "END SHERD UNKNOWN");
         match armor::dearmor(&tampered) {
             Ok(_) => bail!("armor parser accepted unknown label"),
             Err(_) => Ok(()),
@@ -1035,7 +1034,7 @@ pub fn run_all_selftests() -> Result<()> {
                 let first_k: Vec<Vec<u8>> = shares[..k as usize].to_vec();
                 let combo = shamir::combine(&first_k, k)?;
                 if combo.as_slice() != secret.as_bytes() {
-                    bail!("gmul regression at k={}, n={}", k, n);
+                    bail!("gmul mismatch at k={}, n={}", k, n);
                 }
             }
         }
@@ -1043,7 +1042,7 @@ pub fn run_all_selftests() -> Result<()> {
     });
 
     test!("armor round-trip", {
-        let data = b"\x00\x01\x02\x03\xff\xfe\xfd\xfc fortis test";
+        let data = b"\x00\x01\x02\x03\xff\xfe\xfd\xfc sherd test";
         let armored = armor::armor(ARMOR_MSG, data);
         let dearmored = armor::dearmor(&armored)?;
         if dearmored != data {
@@ -1156,7 +1155,7 @@ pub fn run_all_selftests() -> Result<()> {
         Ok(())
     });
 
-    // encrypt_envelope rejects input starting with the FORTIS magic.
+    // encrypt_envelope rejects input starting with the SHERD magic.
     test!("recursive encryption rejected", {
         let pt = b"recursive-encryption-test-message";
         let env1 = envelope::encrypt_envelope(
@@ -1178,7 +1177,7 @@ pub fn run_all_selftests() -> Result<()> {
             crate::crypto::constants::KdfPreset::Standard,
             false,
         ) {
-            Ok(_) => bail!("recursive encryption of a FORTIS envelope was accepted"),
+            Ok(_) => bail!("recursive encryption of a SHERD envelope was accepted"),
             Err(_) => Ok(()),
         }
     });
@@ -1186,9 +1185,9 @@ pub fn run_all_selftests() -> Result<()> {
     // Release-binary mlock verification lives in tests/mlock_bypass.rs.
     // Here we just check the env var does not leak into the unit-test env.
     test!("no_mlock env not leaked", {
-        if std::env::var("FORTIS_ALLOW_NO_MLOCK").is_ok() {
+        if std::env::var("SHERD_ALLOW_NO_MLOCK").is_ok() {
             bail!(
-                "FORTIS_ALLOW_NO_MLOCK is set in the test environment, \
+                "SHERD_ALLOW_NO_MLOCK is set in the test environment, \
                   a previous test failed to clean up"
             );
         }
@@ -1344,11 +1343,10 @@ pub fn run_all_selftests() -> Result<()> {
     Ok(())
 }
 
-/// SHA-256 of the running binary, used by `fortis hash`.
+/// SHA-256 of the running binary, used by `sherd hash`.
 ///
-/// current_exe may resolve symlinks. If the binary can be replaced between
-/// resolution and open, the hash is moot. Compute out-of-band for sensitive
-/// environments.
+/// current_exe may resolve symlinks; the binary can be replaced between
+/// resolution and open.
 pub fn compute_binary_hash() -> Result<String> {
     use sha2::{Digest, Sha256};
     let exe = std::env::current_exe()?;

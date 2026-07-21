@@ -1,12 +1,12 @@
 [package]
-name = "fortis"
-version = "7.3.0"
+name = "sherd"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.74"
-authors = ["Fortis Project"]
+authors = ["Sherd Project"]
 license = "MIT OR Apache-2.0"
 description = "Paranoid-grade symmetric encryption tool with plausible deniability and Shamir secret sharing"
-repository = "https://github.com/fortis/fortis"
+repository = "https://github.com/sherd/sherd"
 keywords = ["crypto", "encryption", "aes-gcm", "argon2", "shamir"]
 categories = ["cryptography", "command-line-utilities"]
 publish = false
@@ -18,7 +18,7 @@ publish = false
 auditable = false
 
 [[bin]]
-name = "fortis"
+name = "sherd"
 path = "src/main.rs"
 
 [profile.release]
