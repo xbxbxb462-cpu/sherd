@@ -1,3 +1,5 @@
+![](/logo.png)
+
 # sherd
 
 A paranoid-grade, single-binary offline encryption tool. sherd encrypts
