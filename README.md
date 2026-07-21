@@ -1,6 +1,6 @@
-# Sherd
+# sherd
 
-A paranoid-grade, single-binary offline encryption tool. Sherd encrypts
+A paranoid-grade, single-binary offline encryption tool. sherd encrypts
 messages and files with **AES-256-GCM** using a key derived from your
 passphrase via **Argon2id** and **HKDF-SHA256**. It supports
 **plausible deniability** through an indistinguishable decoy slot,
@@ -10,7 +10,7 @@ buffers — including plaintext — are zeroized on drop, the entire
 process address space is locked against swap via `mlockall`, and core
 dumps are disabled.
 
-> Sherd targets Unix platforms (Linux, macOS, BSD). Windows is not
+> sherd targets Unix platforms (Linux, macOS, BSD). Windows is not
 > supported; use WSL2 if you must run on Windows.
 
 ## Features
@@ -53,8 +53,8 @@ dumps are disabled.
 
 From source (requires Rust 1.74+):
 
-```sh
-git clone https://github.com/sherd/sherd.git
+```shell
+git clone https://github.com/xbxbxb462-cpu/sherd.git
 cd sherd
 cargo install --path .
 ```
@@ -65,7 +65,7 @@ The binary is installed as `sherd` in your Cargo bin directory
 For production use, grant the binary `CAP_IPC_LOCK` so it can lock
 memory against swap without running as root:
 
-```sh
+```shell
 sudo setcap cap_ipc_lock=ep $(which sherd)
 ```
 
@@ -81,7 +81,7 @@ Alternatively, raise the `memlock` rlimit in
 
 ### Encrypt a message (stdin → stdout, ASCII-armored)
 
-```sh
+```shell
 echo "top secret" | sherd encrypt --kdf standard > message.shrd.asc
 ```
 
@@ -89,26 +89,26 @@ You will be prompted for a passphrase (minimum 12 characters).
 
 ### Decrypt a message
 
-```sh
+```shell
 sherd decrypt -i message.shrd.asc -o plaintext.txt
 ```
 
 ### Encrypt a file (binary envelope, `.shrd` extension)
 
-```sh
+```shell
 sherd encrypt-file -i report.pdf
 # → report.pdf.shrd
 ```
 
 ### Decrypt a file
 
-```sh
+```shell
 sherd decrypt-file -i report.pdf.shrd -o report.pdf
 ```
 
 ### Encrypt with a decoy (plausible deniability)
 
-```sh
+```shell
 sherd encrypt \
   --decoy decoy.txt \
   --decoy-pass-file decoy-pass.txt \
@@ -121,7 +121,7 @@ two slots are indistinguishable from ciphertext alone.
 
 ### Split a secret with Shamir (3-of-5)
 
-```sh
+```shell
 sherd share-split -i master.key -k 3 -n 5 > shares.txt
 ```
 
@@ -130,7 +130,7 @@ over a separate channel.
 
 ### Reconstruct a secret
 
-```sh
+```shell
 sherd share-combine -k 3 -s share1.txt -s share2.txt -s share3.txt -o master.key
 ```
 
@@ -142,11 +142,11 @@ any share.
 For non-interactive use, prefer file descriptors (never appear in
 `/proc/PID/cmdline`):
 
-```sh
+```shell
 sherd encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.shrd
 ```
 
-`--pass-file <path>` is also supported (the path appears in cmdline,
+`--pass-file <path> is also supported (the path appears in cmdline,
 but the passphrase does not). The `SHERD_PASS` environment variable
 is supported as a CI/testing convenience **with a loud warning**: on
 Linux it remains visible in `/proc/PID/environ` for the entire
@@ -154,7 +154,7 @@ process lifetime.
 
 ### Verify the binary
 
-```sh
+```shell
 sherd hash
 sherd selftest
 ```
@@ -165,7 +165,7 @@ known-answer tests.
 
 ## Security notes
 
-- **Threat model.** Sherd defends against ciphertext-only attackers,
+- **Threat model.** sherd defends against ciphertext-only attackers,
   header tampering, commit-tag forgery, chunk compromise, nonce reuse,
   timing oracles, coercion (via the decoy layer), and memory forensics.
   It does **not** defend against a compromised OS or hardware
@@ -180,7 +180,7 @@ known-answer tests.
   decryption time.
 - **No recursive encryption.** Re-encrypting an already-encrypted
   file is an operational footgun. `sherd encrypt` refuses input that
-  begins with the `SHR1` magic unless you pass `--force`.
+  begins with the `SPRD` magic unless you pass `--force`.
 - **Constant-time operations.** Secret comparisons use
   `subtle::ConstantTimeEq`. GF(256) arithmetic (used by Shamir) is
   branchless.
