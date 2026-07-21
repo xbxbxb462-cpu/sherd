@@ -1,34 +1,8 @@
-//! Fortis — offline symmetric encryption tool.
+//! Fortis: offline symmetric encryption tool.
 //!
-//! Architecture:
-//!   L1  Key Derivation      Argon2id → HKDF-Extract → HKDF-Expand
-//!   L2  AEAD Encryption     AES-256-GCM (per-chunk, isolated keys)
-//!   L4  Multi-Layer Integrity  AES-GCM tag + Key-commitment HMAC + chunk AAD
-//!   L5  Constant-Time Ops   `subtle::ConstantTimeEq` for all secret comparisons
-//!   L6  Streaming           1 MiB chunks, per-chunk HKDF-Expand keys
-//!   L7  Key Commitment      HMAC-SHA256-trunc-128, verified BEFORE AEAD decrypt
-//!   L8  Header Authentication  Entire header bound as AEAD AAD
-//!   L9  Cryptographic Agility  cipher_id / kdf_id / commit_id bytes in header
-//!   L10 Secure Metadata     No filename/MIME/timestamps in cleartext header
-//!
-//! Threat model:
-//!   - Network adversaries: there is no network code in this binary.
-//!   - Ciphertext-only attackers: throttled by Argon2id memory-hard cost.
-//!   - Header tampering: every header byte is AEAD AAD AND commit_tag input.
-//!   - Commit-tag forgery: HMAC-SHA256-trunc-128 is unforgeable.
-//!   - Chunk compromise: per-chunk keys via HKDF-Expand are independent.
-//!   - Nonce reuse: per-chunk counter nonces unique by construction.
-//!   - Timing oracles: constant-time compare, uniform error messages,
-//!     uniform chunk-processing count.
-//!   - Coercion: optional decoy layer with plausible deniability.
-//!   - Memory forensics: `zeroize` on every secret buffer (including
-//!     plaintext); `mlock` on keys; `mlockall` on the whole process.
-//!
-//! NOT in scope (document openly):
-//!   - Compromised OS / hardware implants (use Tails OS + air-gapped machine).
-//!   - Cold boot attacks (reboot cold before/after sensitive operations).
-//!   - Browser/OS 0-days (out of scope for any single tool).
-//!   - Quantum adversaries with CRQC (AES-256 is Grover-resistant to 2^128).
+//! Argon2id -> HKDF -> AES-256-GCM with per-chunk isolated keys.
+//! Key-commitment HMAC verified before AEAD decrypt. Secret buffers are
+//! zeroized on drop; mlockall locks the whole process against swap.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -81,23 +55,11 @@ enum Command {
     Hash,
 }
 
-/// Install a panic hook that prints a GENERIC message with no source
-/// paths, line numbers, or backtrace. The default Rust panic hook prints
-/// `panicked at 'msg', src/foo.rs:123:45` and, if `RUST_BACKTRACE=1` is
-/// set in the environment, a full backtrace including file paths and
-/// memory addresses. For a crypto tool, these leaks to stderr are
-/// unacceptable: terminal logs are often captured (syslog, journald,
-/// screen hardcopy) and a backtrace can reveal the exact build tree
-/// layout and potentially intermediate values in stack frames.
-///
-/// The hook still aborts the process (panics in a crypto tool are
-/// unrecoverable). With `panic = "unwind"` (the project default), Drop
-/// impls run during unwinding BEFORE the hook fires, so Zeroizing/SecretBytes
-/// buffers are wiped. The hook is the LAST thing to run.
-///
-/// IMPORTANT: this hook is installed BEFORE mlockall and BEFORE any secret
-/// material exists, so a panic during initialization (e.g., mlock retry
-/// logic) is also covered.
+/// Replace the default panic hook with one that prints a generic message.
+/// The default hook leaks source paths, line numbers, and backtraces to
+/// stderr, which terminal logs often capture. Drop impls run during
+/// unwinding before the hook fires, so secret buffers get wiped. Installed
+/// first, before mlockall and any secret material exists.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|_info| {
         eprintln!("[fortis] FATAL: internal error — aborting.");
@@ -109,22 +71,13 @@ fn install_panic_hook() {
 }
 
 fn main() -> Result<()> {
-    // Install the sanitized panic hook BEFORE any other initialization.
-    // This must be the very first thing main() does so that a panic in
-    // any subsequent setup code (setrlimit, mlockall, CLI parsing) does
-    // not leak paths via the default hook.
+    // First thing in main: a panic in any later setup code must not leak
+    // paths via the default hook.
     install_panic_hook();
 
-    // Disable core dumps to prevent secrets leaking into core files if
-    // the process crashes. A core dump would contain the full process
-    // memory including passphrases and keys.
-    //
-    // Report setrlimit failures instead of silently ignoring. The
-    // previous `let _ = libc::setrlimit(...)` would silently ignore
-    // failures. On a system with a strict seccomp profile or a container
-    // that blocks setrlimit, core dumps would remain enabled and a crash
-    // would dump all secrets to disk. We now print a warning so the
-    // operator knows core dumps could not be disabled.
+    // Disable core dumps. A core file would contain the full process
+    // memory including passphrases and keys. Report failures so the
+    // operator knows dumps could not be disabled.
     #[cfg(unix)]
     unsafe {
         let rlim = libc::rlimit {
@@ -139,23 +92,11 @@ fn main() -> Result<()> {
                 err
             );
         }
-        // Also try to disable core dumps via prctl(PR_SET_DUMPABLE, 0).
-        // setrlimit(RLIMIT_CORE, 0) prevents the kernel from writing a
-        // core file, but prctl(PR_SET_DUMPABLE, 0) goes further: it
-        // prevents ptrace attach by non-root users AND disables core
-        // dump generation even when RLIMIT_CORE is non-zero. Defense in
-        // depth.
-        // PR_SET_DUMPABLE = 4 on Linux.
-        //
-        // prctl is Linux-specific. On macOS/BSD, the equivalent is
-        // proc_trace_control (macOS) or procctl (FreeBSD). For now, we
-        // only call prctl on Linux. On other Unix platforms, setrlimit
-        // remains the only defense.
-        //
-        // The previous `let _ = libc::prctl(...)` would silently ignore
-        // failures. A failure here means ptrace attach may still be
-        // possible by a same-UID process, which is a memory-protection
-        // concern. We now print a warning on failure.
+        // Also call prctl(PR_SET_DUMPABLE, 0) on Linux. setrlimit covers
+        // core files; prctl additionally blocks ptrace attach by non-root
+        // users and disables dumps even if RLIMIT_CORE is later raised.
+        // PR_SET_DUMPABLE = 4. Linux-only; on other Unix only setrlimit
+        // applies.
         #[cfg(target_os = "linux")]
         {
             let pr_ret = libc::prctl(4, 0, 0, 0, 0);
@@ -170,30 +111,16 @@ fn main() -> Result<()> {
         }
     }
 
-    // =====================================================================
-    // FORTIS_ALLOW_NO_MLOCK hardening.
-    // =====================================================================
-    //
-    // Policy:
-    //   - RELEASE builds: if the FORTIS_ALLOW_NO_MLOCK variable is present
-    //     in the environment AT ALL (regardless of its value), the process
-    //     REFUSES TO START. This catches:
-    //       (a) operators who copy-paste a CI command into production,
-    //       (b) adversaries who set the variable non-interactively,
-    //       (c) misconfigured wrapper scripts.
-    //     The operator must unset the variable and grant CAP_IPC_LOCK
-    //     (or run as root, or raise /etc/security/limits.conf memlock).
-    //
-    //   - DEBUG builds: the bypass IS honored (value must be "1" or
-    //     "true"), but a LOUD multi-line warning is printed to stderr.
-    //     This permits CI and local dev workflows (where mlockall may
-    //     fail due to container limits) without weakening release
-    //     binaries.
+    // FORTIS_ALLOW_NO_MLOCK policy:
+    //   - Release builds refuse to start if the env var is present at all,
+    //     catching operator mistakes or an adversary setting it.
+    //   - Debug builds honor it (value "1" or "true") with a loud warning,
+    //     so CI can run without CAP_IPC_LOCK.
     #[cfg(unix)]
     {
         #[cfg(not(debug_assertions))]
         {
-            // RELEASE build: refuse if the variable is present at all.
+            // Release: refuse if the variable is present at all.
             if std::env::var_os("FORTIS_ALLOW_NO_MLOCK").is_some() {
                 eprintln!("[fortis] FATAL: FORTIS_ALLOW_NO_MLOCK is set in the environment,");
                 eprintln!("[fortis]        but this is a RELEASE build. The memory-lock");
@@ -208,9 +135,7 @@ fn main() -> Result<()> {
                 eprintln!("[fortis]          *  soft  memlock  unlimited");
                 eprintln!("[fortis]          *  hard  memlock  unlimited");
                 eprintln!("[fortis]        Refusing to continue.");
-                // Exit code 2 distinguishes "security policy violation" from
-                // "operational error" (exit 1). No secrets exist yet at this
-                // point, so skipping Drop is safe.
+                // Exit 2 = security policy violation. No secrets exist yet.
                 std::process::exit(2);
             }
         }
@@ -234,43 +159,26 @@ fn main() -> Result<()> {
         }
     };
 
-    // Lock ALL current and future memory pages to prevent ANY swapping
-    // to disk. This covers Argon2id internal memory (64-256 MiB), AES-GCM
-    // buffers, HKDF intermediates — ALL of which contain secret-derived
-    // data. Without mlockall, only SecretBytes buffers are locked, but
-    // the argon2 crate's internal allocations are NOT covered and can
-    // swap to disk.
+    // mlockall(MCL_CURRENT | MCL_FUTURE) so the kernel never swaps any
+    // page: Argon2id working set, AES-GCM buffers, HKDF intermediates.
+    // The per-buffer mlock in SecretBytes does not cover third-party
+    // crate allocations; only mlockall does.
     //
-    // For high-sensitivity use, mlockall failure is FATAL. Previously
-    // the code printed a warning and continued, which meant that on a
-    // system without CAP_IPC_LOCK the tool would silently operate
-    // without memory locking — leaving secrets free to swap to disk.
-    // The operator must either:
-    //   (a) run with `sudo setcap cap_ipc_lock=ep ./fortis`, or
-    //   (b) configure /etc/security/limits.conf with `* memlock unlimited`,
-    //   (c) run as root.
-    //
-    // In release builds, the FORTIS_ALLOW_NO_MLOCK escape hatch is
-    // restricted to debug builds (see the block above). In release
-    // builds the variable is rejected before we even reach mlockall, so
-    // `allow_no_mlock` is always `false` in release.
+    // Failure is fatal in release: secrets could otherwise swap to disk.
+    // The operator must grant CAP_IPC_LOCK, configure limits.conf, or
+    // run as root. The FORTIS_ALLOW_NO_MLOCK bypass is debug-only.
     #[cfg(unix)]
     {
-        // Track whether mlockall actually succeeded so the memory
-        // module knows future allocations are already covered by
-        // MCL_FUTURE. Without this, SecretBytes::try_lock would
-        // wrongly abort on per-buffer mlock failures even when the
-        // page was already locked process-wide.
+        // Track whether mlockall succeeded so the memory module knows
+        // future pages are already covered by MCL_FUTURE and per-buffer
+        // mlock failures can be non-fatal.
         let mut mlockall_ok = false;
         unsafe {
-            // MCL_CURRENT = lock all currently mapped pages
-            // MCL_FUTURE   = lock all future mappings automatically
+            // MCL_CURRENT: lock existing pages. MCL_FUTURE: lock future ones.
             let flags = libc::MCL_CURRENT | libc::MCL_FUTURE;
             if libc::mlockall(flags) != 0 {
-                // Capture errno for diagnosis.
+                // Likely RLIMIT_MEMLOCK too low. Try raising it, then retry.
                 let mlockall_err = std::io::Error::last_os_error();
-                // mlockall failed — likely RLIMIT_MEMLOCK too low.
-                // Try to raise the limit first, then retry.
                 let mut rlim: libc::rlimit = std::mem::zeroed();
                 if libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut rlim) == 0 {
                     let mut new_rlim = rlim;
@@ -341,14 +249,9 @@ fn main() -> Result<()> {
                 mlockall_ok = true;
             }
         }
-        // Inform the memory module of process-wide protection state.
-        // - If mlockall succeeded: mark it active so per-buffer mlock
-        //   failures become non-fatal (MCL_FUTURE already covers the page).
-        // - If mlockall failed but the operator accepted the no-mlock risk
-        //   via FORTIS_ALLOW_NO_MLOCK=1 (debug builds only): mark the
-        //   bypass as accepted so per-buffer mlock failures do not abort.
-        //   Without this, SecretBytes::try_lock would abort on the first
-        //   per-buffer mlock failure, defeating the bypass.
+        // Tell the memory module whether MCL_FUTURE is in effect so
+        // per-buffer mlock failures in SecretBytes::try_lock are
+        // non-fatal (already covered) or treated as an accepted bypass.
         if mlockall_ok {
             memory::mark_process_mlockall_active();
         } else if allow_no_mlock {
@@ -383,21 +286,12 @@ fn main() -> Result<()> {
         }
     };
 
-    // Command handlers NEVER call std::process::exit() on the
-    // decrypt-failure path — they return Err(...) so that Drop impls
-    // (Zeroizing, SecretBytes) run during stack unwinding, wiping
-    // secrets before the process exits.
-    //
-    // We print only the TOP-LEVEL error message (Display, not Debug).
-    // anyhow's default Termination uses {:?} (Debug) which prints the
-    // full error chain — that could leak OS error strings, absolute
-    // paths from canonicalize(), or other internal diagnostics to
-    // stderr. By printing {} (Display) we show only the curated
-    // top-level message that the command handler chose to surface.
-    //
-    // At this point all command-handler locals are already dropped
-    // (the handlers returned), so std::process::exit(1) skipping Drop
-    // is safe — no secret buffers remain in scope.
+    // Command handlers return Err on the decrypt-failure path so Drop
+    // impls wipe secrets during unwinding. We print only the top-level
+    // Display message; anyhow's default Termination uses Debug and
+    // would print the full chain, leaking OS strings or paths. Handler
+    // locals are already dropped by here, so exit(1) skipping Drop is
+    // safe.
     match result {
         Ok(()) => Ok(()),
         Err(e) => {

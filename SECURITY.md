@@ -11,9 +11,14 @@ issue.
 **Please do not open public GitHub issues for security-related
 problems.**
 
-Instead, report vulnerabilities privately by opening a new **GitHub
-Security Advisory** via the "Security" → "Advisories" → "Report a
-vulnerability" tab on the Fortis repository.
+Instead, report vulnerabilities privately:
+
+1. Open a new **GitHub Security Advisory** via the
+   "Security" → "Advisories" → "Report a vulnerability" tab on the
+   Fortis repository, **or**
+2. Email the maintainers directly at `security@fortis.invalid` (PGP
+   key fingerprint published in the repository root as
+   `SECURITY-PGP.asc` if available).
 
 Please include the following in your report, where applicable:
 

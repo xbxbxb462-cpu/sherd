@@ -1,21 +1,10 @@
 //! Fortis v7 binary envelope format.
 //!
-//! Layout:
-//! ```text
-//! Fixed header (16 bytes):
-//!   "FRT7" magic | version=7 | flags | cipher_id | kdf_id | commit_id
-//!   | kdf_mem_kib(u32be) | kdf_iters | kdf_par | slot_count
-//!
-//! Per slot (68 bytes + ciphertext):
-//!   salt(32) | base_iv(12) | commit_tag(16)
-//!   | chunk_count(u32be) | ct_total_len(u32be) | ciphertext(ct_total_len)
-//!
-//! Per chunk inside ciphertext:
-//!   AES-256-GCM(key_i, iv_i, aad, pt_i) → ct_i = chunk_pt || tag(16)
-//! ```
-//!
-//! All header bytes (fixed + slot header except the ciphertext itself) are
-//! bound as AEAD AAD AND as commit_tag input.
+//! Fixed 16-byte header, then N slots. Each slot is salt + iv + commit_tag
+//! + chunk_count + ct_total_len + ciphertext. Ciphertext is a stream of
+//! AES-256-GCM chunks. Header bytes are bound as AEAD AAD and into the
+//! commit tag.
+#![allow(clippy::doc_lazy_continuation)]
 
 use crate::crypto::aead;
 use crate::crypto::commit;
@@ -31,25 +20,12 @@ use zeroize::Zeroizing;
 // Typed envelope errors
 // ---------------------------------------------------------------------------
 
-/// Typed error for envelope operations.
-///
-/// Using a typed error makes it possible for callers (cli.rs) to distinguish
-/// "input was already encrypted" from "cryptographic failure". Callers of
-/// `encrypt_envelope` should match on `downcast_ref::<EnvelopeError>()` to
-/// detect the `InputAlreadyEncrypted` case and prompt the user to either:
-///   (a) re-run with `--force` (which calls `encrypt_envelope_force`), or
-///   (b) decrypt the file first, then re-encrypt.
+/// Typed envelope error: "already encrypted" vs generic failure.
 #[derive(Debug)]
 pub enum EnvelopeError {
-    /// The input plaintext appears to already be a Fortis envelope (begins
-    /// with the "FRT7" magic bytes). Re-encrypting would produce a
-    /// double-encrypted file requiring two passphrase entries to decrypt —
-    /// an operational footgun. Callers should catch this and offer the
-    /// `--force` override (`encrypt_envelope_force`).
+    /// Input already looks like a Fortis envelope. Caller can offer `--force`.
     InputAlreadyEncrypted,
-    /// Generic envelope error (malformed input, cryptographic failure,
-    /// tamper detected, etc.). The uniform "bad" message prevents
-    /// error-message oracles.
+    /// Generic envelope error. Uniform "bad" message.
     #[allow(dead_code)]
     Bad,
 }
@@ -69,21 +45,8 @@ impl std::fmt::Display for EnvelopeError {
 
 impl std::error::Error for EnvelopeError {}
 
-/// Detect whether input bytes appear to be a Fortis envelope.
-///
-/// Returns `true` iff the input is at least 4 bytes long AND begins with
-/// the Fortis magic bytes `"FRT7"` (0x46 0x52 0x54 0x37).
-///
-/// Used by `encrypt_envelope` to refuse re-encrypting an already-encrypted
-/// file. The check is intentionally simple: just the 4-byte magic. A more
-/// thorough check (version byte, slot structure) would create a parsing
-/// oracle and risks false negatives on truncated envelopes. The magic
-/// check is sufficient to catch the common operational footgun (re-running
-/// `fortis encrypt` on a `.frts` file).
-///
-/// False positive rate: for random non-Fortis input, the probability that
-/// the first 4 bytes happen to equal "FRT7" is 1/2^32 ≈ 2.3e-10. The
-/// `--force` override exists for the rare legitimate case.
+/// True if input begins with the `"FRT7"` magic. Guards against re-encrypting
+/// an existing envelope.
 pub fn is_fortis_envelope(input: &[u8]) -> bool {
     input.len() >= MAGIC.len() && input[..MAGIC.len()] == MAGIC
 }
@@ -117,15 +80,7 @@ impl FixedHeader {
         kdf_par: u32,
         slot_count: u8,
     ) -> Vec<u8> {
-        // Catch truncation at runtime, not just in debug builds. The wire
-        // format stores kdf_mem_kib as u32 (4 bytes), but kdf_iters and
-        // kdf_par as u8 (1 byte each). If a future preset uses iters > 255
-        // or par > 255, the `as u8` cast would silently truncate, producing
-        // a header that claims weaker KDF params than the encryptor actually
-        // used. The decryptor would then use the weaker params for Argon2id,
-        // producing a different PRK and failing to decrypt — silent data
-        // loss. Using `assert!` (not `debug_assert!`) ensures the check
-        // survives in release builds.
+        // iters and par are stored as u8 on the wire. Catch truncation here.
         assert!(
             kdf_iters <= u8::MAX as u32,
             "kdf_iters {} exceeds u8 range",
@@ -247,16 +202,7 @@ impl Slot {
         }
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&bytes[..SALT_LEN]);
-        // Reject all-zero salt at parse time to keep the decrypt path
-        // uniform across slots. Without this, an attacker who crafts a
-        // slot with an all-zero salt forces `derive_slot_secrets_from_secret`
-        // to bail before the second slot is processed, creating a
-        // non-uniform timing oracle:
-        //   legit file (both salts valid): ~8s (both Argon2id runs)
-        //   slot 0 salt=0:                 ~0s (bail before any Argon2id)
-        //   slot 1 salt=0:                 ~4s (slot 0 Argon2id, then bail)
-        // Validating at parse time makes all crafted files bail uniformly
-        // at ~0s, closing the per-slot timing differential.
+        // Reject all-zero salt up front to keep per-slot timing uniform.
         let mut salt_acc: u8 = 0;
         for b in salt.iter() {
             salt_acc |= *b;
@@ -283,21 +229,8 @@ impl Slot {
         if ct_total_len < TAG_LEN as u32 || ct_total_len > MAX_CT as u32 {
             bail!("bad");
         }
-        // Cross-validate chunk_count ↔ ct_total_len AT PARSE TIME.
-        //
-        // Validating these two fields independently would allow a
-        // malicious slot header to claim chunk_count=200 with
-        // ct_total_len=32 (only 1 chunk's worth of ciphertext). The
-        // mismatch would only be detected at decrypt_stream runtime — by
-        // which point an attacker had already forced the tool to
-        // allocate buffers and run Argon2id on the slot's salt.
-        //
-        // The invariant: for a legitimate slot, the ciphertext consists of
-        //   - (chunk_count - 1) full chunks, each of size (CHUNK_SIZE + TAG_LEN)
-        //   - 1 final chunk, of size in [TAG_LEN, CHUNK_SIZE + TAG_LEN]
-        // So ct_total_len must satisfy:
-        //   (chunk_count - 1) * (CHUNK_SIZE + TAG_LEN) + TAG_LEN  ≤  ct_total_len
-        //   ct_total_len  ≤  chunk_count * (CHUNK_SIZE + TAG_LEN)
+        // Cross-validate chunk_count and ct_total_len: chunk_count-1 full
+        // chunks plus one final chunk of [TAG_LEN, CHUNK_SIZE + TAG_LEN].
         let min_ct_len = ((chunk_count as usize).saturating_sub(1))
             .saturating_mul(CHUNK_SIZE + TAG_LEN)
             .saturating_add(TAG_LEN);
@@ -326,75 +259,34 @@ impl Slot {
 }
 
 // ---------------------------------------------------------------------------
-// Padding — randomized, non-block-aligned scheme
+// Padding: randomized, non-block-aligned
 // ---------------------------------------------------------------------------
 
-/// Minimum padding always added (fixed). Prevents trivially small
-/// ciphertexts (e.g., for a 1-byte plaintext) from revealing the plaintext
-/// length via the ciphertext size. 32 bytes is enough to cover the 4-byte
-/// length prefix plus a small noise floor.
+/// Minimum padding added to every ciphertext. Hides plaintext length for
+/// short inputs.
 const MIN_PAD: usize = 32;
 
-/// Maximum additional random padding (exclusive upper bound) added by
-/// `padded_len`. The randomized component is uniform in `[0, MAX_RAND_PAD)`
-/// bytes. 8 KiB ensures the spread across multiple encryptions of the same
-/// plaintext comfortably exceeds `2 * PAD_BLOCK` (8192 bytes) so the
-/// selftest's spread check still passes with margin.
+/// Upper bound on the random padding added by `padded_len`.
 const MAX_RAND_PAD: usize = 8 * 1024;
 
-/// Maximum independent random padding added to the common target length in
-/// `encrypt_envelope` to break the "file size = 2 * max(real, decoy)"
-/// oracle. The observer's uncertainty about `max(real, decoy)` is bounded
-/// by this value per slot (so `2 * MAX_DECOY_JITTER` for the whole file).
-/// 256 KiB provides substantial obfuscation without excessive space
-/// overhead for typical messages.
+/// Extra random padding layered on top of the common target length in
+/// `encrypt_envelope` to blunt the file-size oracle.
 const MAX_DECOY_JITTER: usize = 256 * 1024;
 
-/// Randomized padding length. Replaces the deterministic
-/// `((4 + pt_len + PAD_BLOCK - 1) / PAD_BLOCK) * PAD_BLOCK` scheme that
-/// quantized output to multiples of 4096 bytes (PAD_BLOCK) — a length
-/// oracle leaking the plaintext length within 4 KiB (and within 8 KiB
-/// after the 1-4 block jitter was applied by `padded_len_with_jitter`).
-///
-/// The new scheme returns:
-///   `4 (length prefix) + pt_len + MIN_PAD + uniform_random(0, MAX_RAND_PAD)`
-///
-/// The output is NO LONGER aligned to any fixed block boundary, breaking
-/// the quantization oracle. An observer of the ciphertext size learns the
-/// plaintext length only modulo a ~8 KiB uniformly-random window centered
-/// on the true length (not aligned to a block boundary).
-///
-/// NOTE: this function is NON-DETERMINISTIC (calls `rng::fill`). The
-/// only internal caller is `padded_len_with_jitter`, which uses the
-/// result as a target length for `pad_plaintext`.
+/// Randomized target padded length: 4-byte length prefix + plaintext + MIN_PAD
+/// plus a uniform random pad in `[0, MAX_RAND_PAD)`.
 pub fn padded_len(plaintext_len: usize) -> usize {
     let mut buf = [0u8; 4];
     rng::fill(&mut buf);
-    // MAX_RAND_PAD = 8192 = 2^13. A u32 mod 2^13 has negligible bias
-    // (< 2^-19); the bias only affects the padding size distribution,
-    // not any cryptographic strength. No rejection sampling needed.
+    // u32 mod 2^13 has negligible bias; rejection sampling not worth it.
     let rand_pad = (u32::from_be_bytes(buf) as usize) % MAX_RAND_PAD;
     4 + plaintext_len + MIN_PAD + rand_pad
 }
 
-/// Apply 1-4 extra 4 KiB padding blocks of jitter on top of the
-/// randomized base, breaking the quantized size leak. Without this, an
-/// observer could determine the plaintext length to within 4 KiB by
-/// looking at the ciphertext size.
-///
-/// The jitter is ALWAYS applied, regardless of the `paranoid` flag.
-/// Conditional jitter would leak the operator's sensitivity assessment
-/// through the ciphertext size: an observer comparing two encryptions of
-/// the same plaintext could determine which used `--paranoid` by checking
-/// if the sizes differ by more than PAD_BLOCK.
-///
-/// The base `padded_len` is randomized (non-block-aligned). The 1-4 block
-/// jitter is preserved for layered defense and selftest compatibility.
-/// With the randomized base plus 1-4 block jitter, the total padding
-/// spread is ~24 KiB.
+/// Adds 1-4 extra 4 KiB blocks on top of `padded_len`. Applied regardless of
+/// `paranoid` to avoid leaking the flag via ciphertext size.
 fn padded_len_with_jitter(plaintext_len: usize, _paranoid: bool) -> usize {
     let base = padded_len(plaintext_len);
-    // Always add 1-4 extra 4 KiB blocks.
     let mut jitter_bytes = [0u8; 1];
     rng::fill(&mut jitter_bytes);
     let extra_blocks = (jitter_bytes[0] % 4) + 1; // 1..=4
@@ -405,54 +297,24 @@ pub fn pad_plaintext(pt: &[u8], target_len: usize, paranoid: bool) -> Result<Zer
     if 4 + pt.len() > target_len {
         bail!("bad");
     }
-    // Validate that `pt.len()` fits in a `u32` before the `as u32` cast
-    // below. The CLI enforces `plaintext.len() <= MAX_CT` (256 MiB)
-    // before reaching here, but `pad_plaintext` is `pub` and a future
-    // library consumer could call it without that guard. A silent
-    // truncation would produce a stored length prefix of
-    // `pt.len() % 2^32` and decryption would return a short slice —
-    // silent data corruption.
+    // `pt.len()` is stored as u32 on the wire; reject inputs that truncate.
     if pt.len() > u32::MAX as usize {
         bail!("bad");
     }
-    // The randomized padding scheme does NOT align to PAD_BLOCK, so an
-    // alignment check would reject all legitimately encrypted files.
-    // The length-prefix (first 4 bytes) is the source of truth for the
-    // plaintext length, and it is authenticated by the AEAD (the entire
-    // padded buffer is the AEAD plaintext). A tampered length prefix
-    // would cause AEAD authentication to fail BEFORE unpad_plaintext is
-    // reached.
+    // Length prefix is AEAD-authenticated; no block alignment required.
     let mut out = Zeroizing::new(vec![0u8; target_len]);
     out[..4].copy_from_slice(&(pt.len() as u32).to_be_bytes());
     out[4..4 + pt.len()].copy_from_slice(pt);
-    // ALWAYS fill padding with CSPRNG output, regardless of the
-    // `paranoid` flag.
-    //
-    // Filling padding with ZEROS in non-paranoid mode had two problems:
-    //   (a) After decryption, an observer can distinguish paranoid from
-    //       non-paranoid mode by looking at the padding bytes. While the
-    //       padding is not exposed to the network (it's inside the
-    //       ciphertext), it IS visible to anyone who decrypts the file —
-    //       including an adversary who coerces the passphrase out of the
-    //       operator. The padding pattern reveals the operator's
-    //       sensitivity assessment, which is a metadata leak.
-    //   (b) Zeros in the padding create a known-plaintext region. While
-    //       AES-256-GCM is not vulnerable to known-plaintext attacks,
-    //       defense in depth dictates that we should not hand the
-    //       adversary any structured data for free.
-    //
-    // The `paranoid` flag now controls ONLY the jitter on `target_len`
-    // (via `padded_len_with_jitter`), not the padding content.
+    // Always fill padding with CSPRNG output. Zero padding leaks the paranoid
+    // flag after decrypt.
     rng::fill(&mut out[4 + pt.len()..]);
-    let _ = paranoid; // no longer affects padding content
+    let _ = paranoid; // unused here
     Ok(out)
 }
 
 #[allow(dead_code)]
 pub fn unpad_plaintext(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    // The randomized padding scheme does NOT align to PAD_BLOCK. The
-    // length prefix (first 4 bytes) is authenticated by the AEAD and is
-    // the sole source of truth for the plaintext length.
+    // Length prefix is the sole source of truth for plaintext length.
     if padded.len() < 4 {
         bail!("bad");
     }
@@ -463,30 +325,8 @@ pub fn unpad_plaintext(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     Ok(Zeroizing::new(padded[4..4 + len].to_vec()))
 }
 
-/// Constant-work unpadder.
-///
-/// `unpad_plaintext` above allocates a Vec whose length equals the
-/// plaintext length, creating a timing side-channel: copying 1 KiB vs
-/// 100 MiB takes wildly different time, which leaks which slot matched
-/// (and breaks plausible deniability).
-///
-/// This wrapper always copies `target_len - 4` bytes (the maximum
-/// possible plaintext for this slot's padded length) and then truncates.
-/// The copy length is data-independent — only the truncation length
-/// depends on the actual plaintext length, and truncation is a single
-/// pointer adjust.
-///
-/// Uses a safe `vec![0u8; max_pt_len]` allocation rather than an
-/// `unsafe { set_len(max_pt_len) }`. The unsafe block was technicallyally
-/// sound (the capacity was guaranteed by `Vec::with_capacity`), but it
-/// was a footgun: any future refactor that changed the capacity
-/// calculation without updating the set_len call would introduce UB. The
-/// safe version initializes the buffer to zeros (a memset), which is a
-/// few microseconds slower for very large files but eliminates the risk
-/// entirely.
+/// Constant-work unpadder. Copies the maximum plaintext length, then truncates.
 fn unpad_plaintext_ct(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    // The randomized padding scheme does NOT align to PAD_BLOCK (see
-    // unpad_plaintext above for rationale).
     if padded.len() < 4 {
         bail!("bad");
     }
@@ -494,14 +334,11 @@ fn unpad_plaintext_ct(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     if len > padded.len() - 4 {
         bail!("bad");
     }
-    // Safe allocation — vec![0u8; N] is always sound. The Zeroizing
-    // wrapper ensures the buffer (including the bytes beyond `len` that
-    // we won't return) is wiped on drop.
+    // Safe init; Zeroizing wipes the buffer including truncated tail on drop.
     let max_pt_len = padded.len() - 4;
     let mut out: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; max_pt_len]);
     // Copy the maximum possible plaintext length (data-independent size).
     out.copy_from_slice(&padded[4..4 + max_pt_len]);
-    // Truncate to the actual plaintext length.
     out.truncate(len);
     Ok(out)
 }
@@ -524,10 +361,7 @@ fn chunk_aad_into(
     chunk_index: u32,
     chunk_count: u32,
 ) {
-    // Reuse the caller-provided buffer instead of allocating a new Vec
-    // per chunk. The AAD is small (~FIXED_HEADER_LEN + SALT_LEN + IV_LEN
-    // + 8 bytes ≈ 80 bytes), but multiplied by chunk_count (up to 256)
-    // the allocator pressure adds up on large inputs.
+    // Reuse the caller's buffer; one AAD per chunk adds up on large inputs.
     out.clear();
     out.reserve(fixed_header.len() + SALT_LEN + IV_LEN + 4 + 4);
     out.extend_from_slice(fixed_header);
@@ -537,9 +371,7 @@ fn chunk_aad_into(
     out.extend_from_slice(&chunk_count.to_be_bytes());
 }
 
-/// Backwards-compatible wrapper that allocates a fresh Vec. Used by
-/// callers that do not benefit from buffer reuse (e.g., single-shot
-/// decrypt of one chunk).
+/// Allocating wrapper around `chunk_aad_into` for one-shot callers.
 #[allow(dead_code)]
 fn chunk_aad(
     fixed_header: &[u8],
@@ -550,12 +382,7 @@ fn chunk_aad(
 ) -> Vec<u8> {
     let mut aad = Vec::with_capacity(fixed_header.len() + SALT_LEN + IV_LEN + 4 + 4);
     chunk_aad_into(
-        &mut aad,
-        fixed_header,
-        salt,
-        base_iv,
-        chunk_index,
-        chunk_count,
+        &mut aad, fixed_header, salt, base_iv, chunk_index, chunk_count,
     );
     aad
 }
@@ -572,13 +399,12 @@ pub fn encrypt_stream(
         bail!("bad");
     }
     let mut ct_out = Vec::with_capacity(padded.len() + (chunk_count as usize) * TAG_LEN);
-    // Reusable AAD buffer — avoids a per-chunk allocation.
+    // Reusable AAD buffer; one alloc instead of one per chunk.
     let mut aad_buf: Vec<u8> = Vec::with_capacity(fixed_header.len() + SALT_LEN + IV_LEN + 4 + 4);
     for i in 0..chunk_count {
         let start = (i as usize) * CHUNK_SIZE;
         let end = (start + CHUNK_SIZE).min(padded.len());
         let chunk = &padded[start..end];
-        // Pass chunk_count to derive_chunk_key_array for domain separation.
         let key = kdf::derive_chunk_key_array(prk, i, chunk_count)?;
         let iv = aead::chunk_nonce(base_iv, i);
         chunk_aad_into(&mut aad_buf, fixed_header, salt, base_iv, i, chunk_count);
@@ -589,23 +415,7 @@ pub fn encrypt_stream(
     Ok((ct_out, chunk_count, ct_total_len))
 }
 
-/// Constant-work decrypt_stream.
-///
-/// A naive implementation that used `?` to early-exit on the first
-/// chunk whose AES-GCM tag failed authentication would create a
-/// measurable timing difference:
-///   - Correct key, all chunks authentic → all N chunks processed (~100ms)
-///   - Wrong key, first chunk fails auth  → only chunk 0 processed (~1ms)
-///
-/// That 100× timing gap is observable by any local adversary (or anyone
-/// measuring process wall-time) and is exactly the side-channel the
-/// decoy layer is designed to close. The fix: ALWAYS process every
-/// chunk, even after an authentication failure. Authentication failures
-/// are recorded in a flag and reflected in the return value, but the
-/// loop body runs the same number of AES-GCM operations in every case.
-/// Because AES-GCM `decrypt` performs the AES-CTR pass BEFORE the tag
-/// compare, the per-chunk cost is data-independent; running all N
-/// chunks makes the total time uniform across success/failure paths.
+/// Constant-work decrypt: process every chunk regardless of tag failure.
 pub fn decrypt_stream(
     prk: &[u8],
     ct: &[u8],
@@ -615,7 +425,7 @@ pub fn decrypt_stream(
     chunk_count: u32,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let mut out: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(ct.len()));
-    // Reusable AAD buffer — avoids a per-chunk allocation.
+    // Reusable AAD buffer; one alloc instead of one per chunk.
     let mut aad_buf: Vec<u8> = Vec::with_capacity(fixed_header.len() + SALT_LEN + IV_LEN + 4 + 4);
     let mut offset = 0usize;
     let mut all_ok = true;
@@ -633,16 +443,13 @@ pub fn decrypt_stream(
         let key = kdf::derive_chunk_key_array(prk, i, chunk_count)?;
         let iv = aead::chunk_nonce(base_iv, i);
         chunk_aad_into(&mut aad_buf, fixed_header, salt, base_iv, i, chunk_count);
-        // ALWAYS run the AES-GCM decrypt (data-independent cost) regardless
-        // of whether previous chunks authenticated.
+        // Always decrypt; the work must be uniform across chunks.
         match aead::decrypt_chunk(&key, &iv, &aad_buf, chunk_ct) {
             Ok(pt) => {
                 out.extend_from_slice(&pt);
             }
             Err(_) => {
-                // Authentication failed. Append zero-filled plaintext of the
-                // expected length so the output buffer is sized identically
-                // to the success path (defends against output-length oracles).
+                // Pad with zeros to match the success path's output size.
                 let pt_len = chunk_ct.len() - TAG_LEN;
                 out.extend(std::iter::repeat(0u8).take(pt_len));
                 all_ok = false;
@@ -678,8 +485,7 @@ pub fn encrypt_slot(
     let mut base_iv = [0u8; IV_LEN];
     rng::fill(&mut base_iv);
 
-    // Consume the passphrase by value; it is wiped the moment Argon2id
-    // finishes inside derive_slot_secrets_from_secret.
+    // Passphrase is consumed by value and wiped after Argon2id.
     let (prk, commit_key) =
         kdf::derive_slot_secrets_from_secret(passphrase, &salt, kdf_mem_kib, kdf_iters, kdf_par)?;
 
@@ -687,9 +493,7 @@ pub fn encrypt_slot(
     let (ct, chunk_count, ct_total_len) =
         encrypt_stream(&prk, &padded, &base_iv, fixed_header, &salt)?;
 
-    // Compute the SHA-256 hash of the first chunk's ciphertext for
-    // inclusion in the commit tag. This binds the tag to actual ciphertext
-    // content, preventing the "invisible salamander" attack.
+    // Hash of the first chunk's ciphertext, bound into the commit tag.
     let first_chunk_ct_len = std::cmp::min(ct.len(), CHUNK_SIZE + TAG_LEN);
     let first_chunk_ct = &ct[..first_chunk_ct_len];
     let ct_first_chunk_hash = commit::compute_first_chunk_hash(first_chunk_ct);
@@ -718,13 +522,9 @@ pub fn encrypt_slot(
     })
 }
 
-/// Encrypt a plaintext into a Fortis envelope. REFUSES to re-encrypt an
-/// input that already appears to be a Fortis envelope (begins with the
-/// "FRT7" magic bytes) — see `is_fortis_envelope`.
-///
-/// To override the recursive-encryption check (e.g., for legitimate
-/// layered encryption with two different passphrases), call
-/// `encrypt_envelope_force` instead.
+/// Encrypt a plaintext into a Fortis envelope. Refuses to re-encrypt an
+/// input that already begins with the FRT7 magic. Use `encrypt_envelope_force`
+/// to override.
 pub fn encrypt_envelope(
     plaintext: &[u8],
     passphrase: SecretBytes,
@@ -733,10 +533,7 @@ pub fn encrypt_envelope(
     kdf_preset: KdfPreset,
     paranoid: bool,
 ) -> Result<Vec<u8>> {
-    // Refuse recursive encryption. The check is on the 4-byte magic only
-    // — cheap, no parsing oracle, and catches the common operational
-    // footgun of re-running `fortis encrypt` on a `.frts` file. Legitimate
-    // layered encryption is still possible via `encrypt_envelope_force`.
+    // Refuse recursive encryption via the 4-byte magic check.
     if is_fortis_envelope(plaintext) {
         return Err(EnvelopeError::InputAlreadyEncrypted.into());
     }
@@ -750,11 +547,8 @@ pub fn encrypt_envelope(
     )
 }
 
-/// `--force` override path. Skips the recursive-encryption check. Use
-/// this when the caller has confirmed (via a `--force` flag or equivalent
-/// UI prompt) that the user wants to re-encrypt an already-encrypted file.
-/// The resulting file will be double-encrypted and require two passphrase
-/// entries to decrypt.
+/// `--force` override path. Skips the recursive-encryption check; the
+/// output will need two passphrase entries to decrypt.
 #[allow(dead_code)]
 pub fn encrypt_envelope_force(
     plaintext: &[u8],
@@ -774,9 +568,8 @@ pub fn encrypt_envelope_force(
     )
 }
 
-/// Internal encryption implementation shared by `encrypt_envelope`
-/// (checked) and `encrypt_envelope_force` (unchecked). Does NOT perform
-/// the recursive-encryption check — callers are responsible for gating.
+/// Internal encryption shared by the checked and force paths. Callers
+/// gate the recursive-encryption check.
 fn encrypt_envelope_impl(
     plaintext: &[u8],
     passphrase: SecretBytes,
@@ -787,46 +580,16 @@ fn encrypt_envelope_impl(
 ) -> Result<Vec<u8>> {
     let params = kdf_preset.params();
     let has_decoy = decoy_plaintext.is_some();
-    // FLAG_PARANOID is ALWAYS set in the wire format, regardless of whether
-    // the user actually requested paranoid padding. Conditionally setting
-    // this flag would leak to any adversary who can read the (unencrypted)
-    // fixed header byte 5 whether the operator considered the data
-    // sensitive enough to warrant paranoid padding — an unacceptable
-    // metadata leak that tells the adversary which files to focus
-    // cracking resources on.
-    //
-    // The actual paranoid-padding behavior is now controlled solely by
-    // the `paranoid` parameter passed to `pad_plaintext` /
-    // `padded_len_with_jitter`. The flag in the header is decorative —
-    // set it always so an observer cannot distinguish paranoid from
-    // non-paranoid encryptions.
-    //
-    // FLAG_DECOY is also always set (see the always-two-slots comment below).
+    // Always set FLAG_PARANOID and FLAG_DECOY. Setting them conditionally
+    // leaks the operator's intent via the unencrypted fixed header.
     let flags = FLAG_DECOY | FLAG_PARANOID;
-    let _ = has_decoy; // no longer used for flag computation
+    let _ = has_decoy; // unused; flag is always set
 
-    // ALWAYS produce 2 slots, even when there is no decoy.
+    // Always produce 2 slots, even without a decoy.
     let slot_count: u8 = 2;
 
-    // The kdf_mem_kib / kdf_iters / kdf_par fields are stored in PLAINTEXT
-    // in the fixed header (bytes 9-14). An observer who can read the
-    // envelope file can determine which KDF preset was used (Standard
-    // 64MiB/3 / Paranoid 128MiB/4 / Extreme 256MiB/5), which leaks the
-    // operator's sensitivity assessment — the same class of metadata leak
-    // that the always-set FLAG_PARANOID fixes.
-    //
-    // A proper fix requires a protocol bump that encrypts these fields in
-    // an authenticated header. The challenge is bootstrapping: the
-    // decryptor needs the KDF params to run Argon2id, which derives the
-    // key used to decrypt the header. A future design would use a fixed
-    // (always-Extreme) KDF for the header-decryption key, then store the
-    // actual message KDF params inside the encrypted header.
-    //
-    // For v7 we leave the fields in plaintext to preserve wire-format
-    // compatibility. This is a KNOWN metadata leak documented in the
-    // threat model; it does NOT affect confidentiality of the plaintext
-    // (the AEAD still authenticates the params via AAD binding, so
-    // tampering is detected).
+    // KDF params are stored in plaintext in the fixed header; the AEAD binds
+    // them so tampering is detected on decrypt.
     let fixed_header = FixedHeader::build(
         flags,
         CIPHER_ID_AES256_GCM,
@@ -838,51 +601,20 @@ fn encrypt_envelope_impl(
         slot_count,
     );
 
-    // Decoy size leak fix.
-    //
-    // PREVIOUS BEHAVIOR (vulnerable):
-    //   target_len = max(real_padded, decoy_padded)
-    //   file_size  = 2 * target_len + overhead
-    //   => file_size deterministically reveals max(real, decoy).
-    //   In practice operators use a small decoy, so a large file size
-    //   leaks the presence of a large REAL (hidden) message — exactly
-    //   what plausible deniability was supposed to hide.
-    //
-    // NEW BEHAVIOR:
-    //   common_min  = max(real_padded_with_jitter, decoy_padded_with_jitter)
-    //   target_len  = common_min + uniform_random(0, MAX_DECOY_JITTER)
-    //   file_size   = 2 * target_len + overhead
-    //   => file_size is no longer deterministically equal to 2*max; it is
-    //      2*(max + independent_random). The observer learns max(real,
-    //      decoy) only within a MAX_DECOY_JITTER (256 KiB) window per slot.
-    //
-    //   The distribution's parameter (common_min) does NOT depend on WHICH
-    //   message is larger — only on the max of the two — satisfying the
-    //   directive: "pad BOTH messages to the SAME random target length
-    //   drawn from a distribution that does NOT depend on which is larger."
-    //
-    //   Both slots are still padded to the SAME target_len, so an observer
-    //   cannot distinguish slot 0 (real) from slot 1 (decoy) by size.
-    //
-    //   Layered defense: padded_len_with_jitter already adds 1-4 PAD_BLOCK
-    //   (4-16 KiB) of independent jitter to EACH message before taking
-    //   the max, so common_min itself is already randomized. The extra
-    //   MAX_DECOY_JITTER (256 KiB) here provides additional obfuscation
-    //   on top, giving a total per-slot uncertainty of up to ~272 KiB.
+    // Pad both slots to the same target length. common_min is the max of the
+    // two jittered padded lengths; target_len adds uniform random padding.
     let common_min = std::cmp::max(
         padded_len_with_jitter(plaintext.len(), paranoid),
         decoy_plaintext.map_or(0, |d| padded_len_with_jitter(d.len(), paranoid)),
     );
     let mut decoy_jitter_buf = [0u8; 4];
     rng::fill(&mut decoy_jitter_buf);
-    // MAX_DECOY_JITTER = 256 KiB = 2^18. u32 mod 2^18 has negligible bias
-    // (< 2^-14); only affects padding size distribution, not crypto strength.
+    // u32 mod 2^18 has negligible bias.
     let extra_decoy_pad = (u32::from_be_bytes(decoy_jitter_buf) as usize) % MAX_DECOY_JITTER;
     let target_len = common_min + extra_decoy_pad;
 
-    // Real slot (slot 0): always encrypts the real plaintext. We move
-    // `passphrase` into encrypt_slot, which wipes it immediately after
-    // Argon2id. The same applies to `decoy_passphrase`.
+    // Real slot. passphrase moves into encrypt_slot and is wiped after Argon2id.
+    // Same applies to decoy_passphrase below.
     let real_slot = encrypt_slot(
         plaintext,
         passphrase,
@@ -897,9 +629,8 @@ fn encrypt_envelope_impl(
     let mut out = fixed_header.clone();
     out.extend_from_slice(&real_slot.to_bytes());
 
-    // Second slot (slot 1): either the user-supplied decoy, or random noise.
+    // Second slot: either the user-supplied decoy, or random noise.
     if let (Some(dp), Some(dpass)) = (decoy_plaintext, decoy_passphrase) {
-        // Real decoy: encrypt the decoy plaintext with the decoy passphrase.
         let decoy_slot = encrypt_slot(
             dp,
             dpass,
@@ -912,10 +643,7 @@ fn encrypt_envelope_impl(
         )?;
         out.extend_from_slice(&decoy_slot.to_bytes());
     } else {
-        // No user decoy — generate a random slot that is structurally
-        // identical to a real encrypted slot but will reject all
-        // passphrases. This ensures every file has exactly 2 slots of
-        // the same size, hiding whether a decoy is present.
+        // No user decoy; synthesize a structurally-identical random slot.
         let dummy_slot = generate_dummy_slot(&fixed_header, target_len, params, paranoid)?;
         out.extend_from_slice(&dummy_slot.to_bytes());
     }
@@ -923,24 +651,12 @@ fn encrypt_envelope_impl(
     Ok(out)
 }
 
-/// Generate a slot that is structurally identical to a real encrypted
-/// slot but contains random ciphertext, a random salt, a random IV, and
-/// a random commit tag. No passphrase will unlock it. This is used to
-/// fill the second slot when no decoy is supplied, so that every file
-/// has 2 indistinguishable slots.
+/// Slot that is structurally identical to a real encrypted slot but filled
+/// with random ciphertext, salt, IV, and commit tag. No passphrase unlocks
+/// it. Used to fill the second slot when no decoy is supplied.
 ///
-/// The dummy ciphertext is generated by running AES-256-GCM with a
-/// RANDOM key on a RANDOM plaintext. This produces a ciphertext that is
-/// structurally identical to a real slot — every chunk has a valid GCM
-/// tag (verifiable only with the key, which we discard). The commit_tag
-/// is also computed properly from a random commit_key, so it has correct
-/// HMAC structure. (Filling the ciphertext with raw CSPRNG output would
-/// be statistically indistinguishable from random but structurally
-/// DIFFERENT — the "tag" region would be raw CSPRNG output rather than
-/// GHASH output, which has specific algebraic properties. No public
-/// attack exists for distinguishing GHASH output from random without the
-/// key, but the theoretical possibility is enough to warrant defense in
-/// depth.)
+/// Ciphertext comes from AES-256-GCM with a random key on a random plaintext.
+/// Chunk tags carry real GHASH structure rather than raw CSPRNG bytes.
 fn generate_dummy_slot(
     fixed_header: &[u8],
     target_len: usize,
@@ -952,16 +668,13 @@ fn generate_dummy_slot(
     let mut base_iv = [0u8; IV_LEN];
     rng::fill(&mut base_iv);
 
-    // Generate a random plaintext of the target padded length.
     let padded_pt: Zeroizing<Vec<u8>> = {
         let mut pt = Zeroizing::new(vec![0u8; target_len]);
         rng::fill(&mut pt);
         pt
     };
 
-    // Generate a random 32-byte master key, derive PRK + commit_key,
-    // and run the REAL encryption pipeline. This produces a ciphertext
-    // with the same structure as a real slot.
+    // Random master key; run the real encrypt pipeline.
     let random_master: SecretBytes = {
         let mut k = [0u8; 32];
         rng::fill(&mut k);
@@ -970,11 +683,9 @@ fn generate_dummy_slot(
     let prk = kdf::hkdf_extract(&salt, &random_master)?;
     let commit_key = kdf::derive_commit_key(&prk)?;
 
-    // Encrypt the random plaintext using the real encrypt_stream.
     let (ct, chunk_count, ct_total_len) =
         encrypt_stream(&prk, &padded_pt, &base_iv, fixed_header, &salt)?;
 
-    // Compute a real commit_tag over the dummy ciphertext.
     let first_chunk_ct_len = std::cmp::min(ct.len(), CHUNK_SIZE + TAG_LEN);
     let first_chunk_ct = &ct[..first_chunk_ct_len];
     let ct_first_chunk_hash = commit::compute_first_chunk_hash(first_chunk_ct);
@@ -1005,24 +716,8 @@ fn generate_dummy_slot(
     })
 }
 
-/// Uniform-timing decrypt_envelope.
-///
-/// For uniform-timing reasons, `decrypt_stream` is called on EVERY slot
-/// regardless of commit-tag match. With the always-process-all-chunks
-/// `decrypt_stream`, the timing of every slot's decryption is identical
-/// regardless of whether the commit tag matched. The remaining flow is:
-///
-///   for slot in slots:
-///       derive_slot_secrets_from_secret(passphrase_clone, salt, ...)
-///       compute_commit_tag(...)
-///       ct_eq(...)        ← constant time
-///       decrypt_stream(...)  ← uniform across all branches
-///
-/// Both branches (commit_ok=true and commit_ok=false) execute the same
-/// sequence of operations with the same data sizes. The only observable
-/// difference is whether `result` gets populated — and that is not
-/// visible to a timing adversary because no I/O happens between the two
-/// iterations.
+/// Uniform-timing decrypt. `decrypt_stream` runs on every slot regardless of
+/// commit-tag match.
 pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zeroizing<Vec<u8>>> {
     if envelope.len() < FIXED_HEADER_LEN {
         bail!("bad");
@@ -1040,20 +735,13 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
         bail!("bad"); // no trailing garbage
     }
 
-    // Always run decrypt_stream AND unpad_plaintext_ct on EVERY slot,
-    // regardless of commit-tag match. This eliminates BOTH:
-    //   - the per-chunk timing gap (decrypt_stream early-exit)
-    //   - the per-slot plaintext-length timing gap (unpad allocation)
-    //
-    // Each iteration consumes a CLONE of the passphrase so the original
-    // can be wiped by the caller (Drop). Each clone is wiped inside
-    // derive_slot_secrets_from_secret immediately after Argon2id.
+    // Run decrypt_stream and unpad on every slot for uniform per-chunk and
+    // per-slot timing. Each iteration takes a passphrase clone, wiped inside
+    // derive_slot_secrets_from_secret.
     let mut result: Option<Zeroizing<Vec<u8>>> = None;
     for slot in &slots {
         let pass_clone = passphrase.try_clone();
-        // Never bail early on a per-slot derive failure. The uniform-
-        // timing design requires every slot to be processed; bailing
-        // would leak which slot failed via wall-clock time.
+        // Continue on derive failure; bailing here leaks via timing.
         let (prk, commit_key) = match kdf::derive_slot_secrets_from_secret(
             pass_clone,
             &slot.salt,
@@ -1065,8 +753,7 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
             Err(_) => continue,
         };
 
-        // Compute the SHA-256 hash of the first chunk's ciphertext for
-        // inclusion in the commit tag.
+        // First-chunk ciphertext hash, bound into the commit tag.
         let first_chunk_ct_len = std::cmp::min(slot.ct.len(), CHUNK_SIZE + TAG_LEN);
         let first_chunk_ct = &slot.ct[..first_chunk_ct_len];
         let ct_first_chunk_hash = commit::compute_first_chunk_hash(first_chunk_ct);
@@ -1087,9 +774,7 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
 
         let commit_ok: bool = expected.ct_eq(&slot.commit_tag).into();
 
-        // Run decrypt_stream REGARDLESS of commit_ok. The fixed
-        // decrypt_stream always processes all N chunks, so the timing
-        // is identical on both branches.
+        // Always run decrypt_stream; it processes all N chunks uniformly.
         let stream_result = decrypt_stream(
             prk.as_slice(),
             &slot.ct,
@@ -1099,12 +784,8 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
             slot.chunk_count,
         );
 
-        // ALWAYS run unpad_plaintext_ct on a padded-sized buffer,
-        // regardless of whether commit_ok matched OR whether
-        // decrypt_stream succeeded. If stream_result failed (e.g., wrong
-        // key, tampered ciphertext), use a zero-filled dummy of the
-        // expected padded length so the unpad work is the same size.
-        // This closes the per-slot plaintext-length timing gap.
+        // Always unpad a padded-sized buffer. On stream failure, use a
+        // zero-filled dummy of the expected length.
         let padded_for_unpad: Zeroizing<Vec<u8>> = match &stream_result {
             Ok(p) => p.clone(),
             Err(_) => {
@@ -1115,14 +796,8 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
         };
         let unpad_result = unpad_plaintext_ct(&padded_for_unpad);
 
-        // ONLY accept the result if ALL of:
-        //   1. commit_ok == true (commit tag matched — wrong passphrase cannot pass)
-        //   2. stream_result == Ok (AES-GCM authenticated ALL chunks — tamper detected)
-        //   3. unpad_result == Ok (padding invariants hold — corrupted plaintext rejected)
-        //   4. result.is_none() (we don't already have a result from a previous slot)
-        // If commit_ok but stream_result is Err, this means the ciphertext
-        // was tampered AFTER the commit tag was computed — we MUST reject
-        // (do NOT accept dummy zero output as a valid decryption).
+        // Accept only if commit matched, the stream authenticated, the
+        // unpad succeeded, and we have no prior result.
         if commit_ok && result.is_none() {
             if let Ok(ref _padded) = stream_result {
                 if let Ok(pt) = unpad_result {
@@ -1130,12 +805,10 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
                 }
             }
         }
-        // Otherwise: discard. The work was done for its timing side-effect.
+        // Otherwise discard; the work was for timing uniformity.
     }
 
-    // Wipe the original passphrase NOW — we no longer need it. (Drop
-    // would also handle it, but doing it here narrows the window.
-    // `passphrase` is owned by value so we can mutate it.)
+    // Wipe the passphrase now to narrow the window before Drop.
     let mut passphrase = passphrase;
     passphrase.wipe();
     drop(passphrase);

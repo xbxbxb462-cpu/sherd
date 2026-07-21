@@ -54,7 +54,7 @@ dumps are disabled.
 From source (requires Rust 1.74+):
 
 ```sh
-git clone https://github.com/xbxbxb462-cpu/fortis.git
+git clone https://github.com/fortis/fortis.git
 cd fortis
 cargo install --path .
 ```

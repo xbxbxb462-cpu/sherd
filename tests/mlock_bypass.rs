@@ -10,12 +10,13 @@
 //! This is the only way to verify the main.rs startup path: unit tests
 //! cannot exercise `main()`.
 
-use std::env;
 use std::process::Command;
+use std::env;
 
 fn fortis_binary() -> String {
     // cargo sets CARGO_BIN_EXE_fortis for integration tests.
-    env::var("CARGO_BIN_EXE_fortis").expect("CARGO_BIN_EXE_fortis not set — run via `cargo test`")
+    env::var("CARGO_BIN_EXE_fortis")
+        .expect("CARGO_BIN_EXE_fortis not set — run via `cargo test`")
 }
 
 #[test]

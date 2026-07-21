@@ -1,37 +1,9 @@
 //! CLI argument parsing and command dispatch.
 //!
-//! All plaintext buffers (input read, decrypted output, Shamir-reconstructed
-//! secret) are wrapped in `Zeroizing<Vec<u8>>` so they are wiped when the
-//! caller drops them.
-//!
-//! The decoy-vs-real passphrase equality check uses `subtle::ConstantTimeEq`
-//! to avoid timing side-channels.
-//!
-//! Output files are created with mode 0600 on Unix, regardless of the
-//! process umask.
-//!
-//! Notable hardening:
-//!   - Decoy-vs-real passphrase equality check uses `subtle::ConstantTimeEq`
-//!     in constant time.
-//!   - TOCTOU on input files is closed by opening the file ONCE, fstat'ing
-//!     the fd, and reading from the SAME fd (via `open_and_read_bounded`).
-//!   - Shamir K (threshold) and N (total) are never printed to stdout or
-//!     stderr.
-//!   - Decrypt-failure paths return `Err(anyhow!(...))` rather than
-//!     `std::process::exit(1)` so Drop impls run.
-//!   - `share_combine` checks `share_blobs.len() < threshold` instead of
-//!     a hardcoded `< 2`.
-//!   - `--force` flag added to `EncryptArgs` and `EncryptFileArgs`. The
-//!     CLI performs a defense-in-depth check for already-encrypted input
-//!     (FORTIS binary magic "FRT7\x07" or armor header
-//!     "-----BEGIN FORTIS MESSAGE-----") and refuses to re-encrypt unless
-//!     `--force` is given.
-//!   - `cmd_encrypt_file` and `cmd_decrypt_file` use `open_and_read_bounded`
-//!     which checks `is_file()` on the OPENED fd (not on a separate stat
-//!     call), closing the device/FIFO bypass.
-//!   - Share data read from stdin and from share files is wrapped in
-//!     `Zeroizing` so it is wiped on drop. Shamir shares are secret
-//!     material (K shares reconstruct the secret).
+//! Plaintext buffers (input read, decrypted output, Shamir-reconstructed
+//! secret) are wrapped in `Zeroizing<Vec<u8>>`. Output files are created
+//! with mode 0600 on Unix. Decrypt-failure paths return Err so Drop impls
+//! run; the decoy-vs-real passphrase check uses `subtle::ConstantTimeEq`.
 
 use crate::armor;
 use crate::crypto::constants::*;
@@ -50,15 +22,12 @@ use zeroize::Zeroizing;
 // Recursive-encryption detection helpers
 // ---------------------------------------------------------------------------
 
-/// The binary envelope magic is "FRT7" (4 bytes) followed by the version
-/// byte (7). If an input file begins with these 5 bytes, it is almost
-/// certainly an already-encrypted Fortis binary envelope. Re-encrypting
-/// it would double-wrap the data and confuse decryption.
+/// Binary envelope magic "FRT7" + version byte 7. Used to detect
+/// already-encrypted input.
 const FORTIS_BINARY_MAGIC: &[u8] = b"FRT7";
 
-/// The ASCII-armored message begins with this exact line. We check for
-/// it (allowing leading whitespace) to detect re-encryption of an
-/// armored message.
+/// Armored message header line. Used to detect re-encryption of an
+/// already-armored message.
 const FORTIS_ARMOR_PREFIX: &str = "-----BEGIN FORTIS MESSAGE-----";
 
 fn looks_like_fortis_binary(data: &[u8]) -> bool {
@@ -66,10 +35,8 @@ fn looks_like_fortis_binary(data: &[u8]) -> bool {
 }
 
 fn looks_like_fortis_armored(data: &[u8]) -> bool {
-    // Only treat as armored if the data is valid UTF-8 and starts with
-    // the armor prefix (after trimming leading whitespace). This avoids
-    // false positives on binary data that happens to contain the magic
-    // bytes by coincidence.
+    // Require valid UTF-8 and the armor prefix after leading whitespace,
+    // to avoid false positives on binary data.
     match std::str::from_utf8(data) {
         Ok(s) => s
             .trim_start_matches(|c: char| c.is_whitespace())
@@ -78,8 +45,7 @@ fn looks_like_fortis_armored(data: &[u8]) -> bool {
     }
 }
 
-/// Returns true if the input looks like an already-encrypted Fortis
-/// artifact (binary envelope or armored message).
+/// True if the input looks like an already-encrypted Fortis artifact.
 fn looks_like_fortis_output(data: &[u8]) -> bool {
     looks_like_fortis_binary(data) || looks_like_fortis_armored(data)
 }
@@ -88,24 +54,13 @@ fn looks_like_fortis_output(data: &[u8]) -> bool {
 // TOCTOU-safe bounded file reader
 // ---------------------------------------------------------------------------
 
-/// Open the file ONCE, fstat the fd, then read from the SAME fd. The
-/// naive `std::fs::metadata(p)` + `std::fs::read(p)` pattern opens the
-/// file twice, allowing an attacker who can swap the path between calls
-/// to make the second `read` operate on a non-regular, unbounded file
-/// (e.g., /dev/zero → OOM, or a FIFO → indefinite block).
-///
-/// This helper:
-///   1. Opens the path with `File::open` (single open).
-///   2. Calls `file.metadata()` (fstat on the fd — no second open).
-///   3. Rejects non-regular files (devices, FIFOs, sockets, symlinks-to-
-///      devices). Symlinks to regular files ARE followed by `File::open`,
-///      which is fine — the fstat sees through to the regular file.
-///   4. Rejects files larger than `max`.
-///   5. Reads the entire fd into a `Zeroizing<Vec<u8>>` (wiped on drop).
-///
-/// `label` is used in error messages (e.g., "--pass-file", "input") so the
-/// operator knows which path failed WITHOUT the absolute path being echoed
-/// (the path could itself be sensitive, e.g., "/home/agent/vault/key.bin").
+/// Open the file once, fstat the fd, then read from the same fd. The
+/// naive metadata + read pattern opens twice and an attacker who swaps
+/// the path between calls can point the second read at a non-regular,
+/// unbounded file. Rejects non-regular files and files larger than `max`.
+/// Reads into a `Zeroizing<Vec<u8>>`. `label` is used in error messages
+/// so the operator knows which path failed without the absolute path
+/// being echoed.
 fn open_and_read_bounded(
     path: &std::path::Path,
     max: usize,
@@ -115,9 +70,8 @@ fn open_and_read_bounded(
     let metadata = file
         .metadata()
         .map_err(|e| anyhow!("{} metadata failed: {}", label, e))?;
-    // Reject non-regular files. fstat on the fd means the attacker cannot
-    // swap the path between the is_file check and the read — we hold the
-    // only file descriptor.
+    // Reject non-regular files. We hold the only fd, so the attacker
+    // cannot swap the path between the is_file check and the read.
     if !metadata.is_file() {
         bail!(
             "{} is not a regular file (devices, FIFOs, sockets not allowed)",
@@ -127,8 +81,7 @@ fn open_and_read_bounded(
     if metadata.len() as usize > max {
         bail!("{} exceeds {} MiB limit", label, max / (1024 * 1024));
     }
-    // Pre-allocate based on fstat size (capped at `max`) to avoid
-    // reallocation churn. Vec::with_capacity(0) is fine for empty files.
+    // Pre-allocate based on fstat size, capped at `max`.
     let cap = std::cmp::min(metadata.len() as usize, max);
     let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(cap));
     // Read from the SAME fd that we fstat'd. No TOCTOU.
@@ -160,7 +113,7 @@ pub struct EncryptArgs {
     #[arg(long)]
     pub paranoid: bool,
 
-    /// Decoy message file (plausible deniability — must supply a decoy passphrase too)
+    /// Decoy message file for plausible deniability. Requires a decoy passphrase.
     #[arg(long)]
     pub decoy: Option<PathBuf>,
 
@@ -172,29 +125,25 @@ pub struct EncryptArgs {
     #[arg(long)]
     pub decoy_pass_fd: Option<u32>,
 
-    /// Read passphrase from this file (one line). More secure than --pass
-    /// because the file path (not the passphrase) appears in cmdline.
+    /// Read passphrase from this file (one line). Safer than --pass: the
+    /// path, not the passphrase, appears in cmdline.
     #[arg(long)]
     pub pass_file: Option<PathBuf>,
 
-    /// Read passphrase from file descriptor N (e.g. 3). Most secure for
-    /// scripting: `./fortis encrypt --pass-fd 3 3<passfile`
+    /// Read passphrase from file descriptor N. Most secure for scripting:
+    /// `./fortis encrypt --pass-fd 3 3<passfile`
     #[arg(long)]
     pub pass_fd: Option<u32>,
 
     /// Allow re-encrypting an input that already looks like a Fortis
-    /// artifact (binary envelope or armored message). Without this flag,
-    /// the CLI refuses to double-wrap. Use only when you genuinely need
-    /// layered encryption (e.g., wrapping an armored message in a binary
-    /// envelope for transport).
+    /// artifact. Without this flag the CLI refuses to double-wrap. Use
+    /// only when you genuinely need layered encryption.
     #[arg(long)]
     pub force: bool,
-    // The `decoy_pass` and `pass` fields are intentionally ABSENT. A
-    // `--pass X` flag would put the passphrase in /proc/PID/cmdline,
-    // shell history, and `ps aux` output. The only accepted passphrase
-    // sources are: --pass-fd, --pass-file, the FORTIS_PASS env var
-    // (debug convenience, see `get_passphrase`), or the interactive
-    // prompt.
+    // `--pass X` is intentionally absent: it would put the passphrase in
+    // /proc/PID/cmdline, shell history, and `ps aux`. Accepted sources
+    // are --pass-fd, --pass-file, FORTIS_PASS (debug convenience), or
+    // the interactive prompt.
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -224,12 +173,9 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
         bail!("plaintext exceeds 256 MiB limit");
     }
 
-    // Defense-in-depth recursive-encryption check. If the input looks
-    // like an already-encrypted Fortis artifact, refuse unless --force
-    // was given. `envelope::encrypt_envelope` performs the same check
-    // internally and returns an `InputAlreadyEncrypted` error; this
-    // CLI-side check gives a clearer message and avoids wasting Argon2id
-    // cycles on a doomed encrypt.
+    // Refuse to re-encrypt an already-encrypted input unless --force is
+    // given. envelope::encrypt_envelope performs the same check; doing
+    // it here gives a clearer message and avoids wasting Argon2id cycles.
     if !args.force && looks_like_fortis_output(&plaintext) {
         bail!(
             "input appears to be an already-encrypted FORTIS message.\n\
@@ -257,11 +203,10 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
             if dpass.len() < MIN_PASS {
                 bail!("decoy passphrase must be at least {} characters", MIN_PASS);
             }
-            // Use `subtle::ConstantTimeEq` directly. A pre-check on
-            // `passphrase.len() != dpass.len()` would short-circuit ct_eq
-            // and leak length-equality via timing. `ConstantTimeEq` for
-            // `&[u8]` already returns false (0) for different-length slices
-            // in constant time.
+            // Use ConstantTimeEq directly. A pre-check on length would
+            // short-circuit ct_eq and leak length-equality via timing.
+            // ConstantTimeEq on &[u8] already returns false for
+            // different-length slices in constant time.
             let same = bool::from(passphrase.as_bytes().ct_eq(dpass.as_bytes()));
             if same {
                 bail!("decoy passphrase must differ from the real passphrase");
@@ -271,22 +216,17 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
             (None, None)
         };
 
-    // Do NOT print the KDF preset to stderr. The preset name ("Standard"
-    // / "Paranoid" / "Extreme") reveals the operator's sensitivity
-    // assessment of the data — an adversary with access to terminal logs
-    // can use this to prioritize which files to attack. Print only a
-    // generic progress message that is identical for all presets.
+    // Do not print the KDF preset to stderr. The name reveals the
+    // operator's sensitivity assessment; an adversary with terminal-log
+    // access could use it to prioritize targets. Print a generic message
+    // identical for all presets.
     eprintln!("[fortis] Deriving key (Argon2id)…");
 
     let t0 = std::time::Instant::now();
-    // `encrypt_envelope` consumes `passphrase` and `decoy_pass` by value;
-    // both are wiped inside `derive_slot_secrets_from_secret` the moment
-    // Argon2id finishes.
-    //
-    // `encrypt_envelope` may return an `InputAlreadyEncrypted` error.
-    // We catch it here and re-print the --force hint, in case the
-    // CLI-side check above missed a case (e.g., a wrapped format that
-    // only envelope.rs recognizes).
+    // encrypt_envelope consumes passphrase and decoy_pass by value; both
+    // are wiped inside derive_slot_secrets_from_secret when Argon2id
+    // finishes. Catch InputAlreadyEncrypted in case the CLI-side check
+    // above missed a wrapped format that only envelope.rs recognizes.
     let env = match envelope::encrypt_envelope(
         &plaintext,
         passphrase,
@@ -297,11 +237,9 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
     ) {
         Ok(v) => v,
         Err(e) => {
-            // Check whether this is the InputAlreadyEncrypted error by
-            // examining the error chain text (anyhow errors are
-            // type-erased, so we match on Display). This is robust
-            // against the exact error type as long as the word "already
-            // encrypted" appears somewhere in the chain.
+            // Match InputAlreadyEncrypted by error-chain text. anyhow
+            // errors are type-erased, so we match on Display. Robust as
+            // long as "already encrypted" appears somewhere in the chain.
             let mut found = false;
             let mut src: Option<&dyn std::error::Error> = Some(e.as_ref());
             while let Some(err) = src {
@@ -327,13 +265,10 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
     let armored = armor::armor(ARMOR_MSG, &env);
     write_output(&args.output, armored.as_bytes())?;
 
-    // Do NOT print the envelope size or elapsed time. Both leak
-    // information: size correlates with plaintext size (even with
-    // --paranoid padding, the size modulo 4 KiB reveals the preset
-    // jitter range), and elapsed time reveals the KDF preset (Extreme
-    // is ~3× slower than Standard). The operator can wrap the
-    // invocation in `time` and check the output file size themselves
-    // if they want these numbers.
+    // Do not print the envelope size or elapsed time. Size correlates
+    // with plaintext size (even with --paranoid, the size mod 4 KiB
+    // reveals the preset jitter range) and elapsed time reveals the KDF
+    // preset. The operator can use `time` and check the file size.
     let _ = elapsed;
     let _ = env.len();
     eprintln!("[fortis] Encrypted.");
@@ -369,51 +304,35 @@ pub fn cmd_decrypt_message(args: DecryptArgs) -> Result<()> {
         &String::from_utf8_lossy(&armored),
         ARMOR_MSG,
     )?);
-    // Wipe the armored copy now — we have the binary envelope. `armored`
-    // is `Zeroizing<Vec<u8>>`, so Drop wipes it. But we drop explicitly
-    // to release the memory ASAP (before passphrase prompt).
+    // Drop the armored copy now to release memory before the passphrase
+    // prompt. Drop wipes it via Zeroizing.
     drop(armored);
 
     let passphrase = get_passphrase(&args.pass_file, &args.pass_fd, "Passphrase: ")?;
 
-    // Enforce MIN_PASS on decrypt too. The previous behavior of
-    // enforcing MIN_PASS only on encrypt could leak information: an
-    // adversary observing the error message ("passphrase too short" vs
-    // "bad passphrase") could determine whether a short passphrase was
-    // attempted. For uniform behavior, we enforce the same minimum on
-    // both paths.
-    //
-    // We do NOT bail with "passphrase too short" — that would leak the
-    // length. We bail with the same uniform "bad" error used for wrong
-    // passphrases. The length check is purely a defense against
-    // accidental submission of empty or 1-char passphrases that would
-    // waste Argon2id cycles.
+    // Enforce MIN_PASS on decrypt too, with the same uniform "bad"
+    // error used for wrong passphrases. A distinct "passphrase too
+    // short" message would leak whether a short passphrase was
+    // attempted. The length check itself just avoids wasting Argon2id
+    // cycles on empty or 1-char submissions.
     if passphrase.len() < MIN_PASS {
         bail!("bad");
     }
 
     eprintln!("[fortis] Deriving key, verifying commit tag, decrypting…");
-    // `decrypt_envelope` consumes `passphrase` by value (wiped inside
-    // Argon2id). `env` is `Zeroizing<Vec<u8>>` and is wiped on Drop. On
-    // the Err path we return Err (not std::process::exit) so Drop runs.
+    // decrypt_envelope consumes passphrase by value (wiped in Argon2id).
+    // env is Zeroizing<Vec<u8>>. On Err we return Err so Drop runs.
     let pt = match envelope::decrypt_envelope(env.as_slice(), passphrase) {
         Ok(pt) => pt,
         Err(_) => {
-            // Returning `Err` (not `std::process::exit(1)`) ensures Drop
-            // impls run: the `env` buffer (ciphertext) and any other
-            // locals are wiped. main() prints only the top-level Display
-            // message (no chain), so the operator sees a single curated
-            // line.
-            //
-            // The message is uniform with `cmd_decrypt_file` so an
-            // observer cannot distinguish message-decrypt failure from
-            // file-decrypt failure by stderr text (the subcommand choice
-            // is already visible in /proc/PID/cmdline, so no additional
-            // leak).
+            // Return Err so Drop wipes env and other locals. main()
+            // prints only the top-level Display message. Uniform with
+            // cmd_decrypt_file so stderr text does not distinguish
+            // message-decrypt from file-decrypt failure.
             bail!("decryption failed — wrong passphrase or corrupted/tampered message");
         }
     };
-    // `env` is dropped here (Zeroizing wipes it) before we write output.
+    // Drop env (Zeroizing wipes it) before writing output.
     drop(env);
     write_output(&args.output, &pt)?;
     eprintln!("[fortis] Decrypted.");
@@ -465,10 +384,8 @@ pub fn cmd_encrypt_file(args: EncryptFileArgs) -> Result<()> {
         bail!("file exceeds 256 MiB limit");
     }
 
-    // Defense-in-depth recursive-encryption check. A .frts file always
-    // begins with the "FRT7\x07" magic. If the operator accidentally
-    // passes an already-encrypted file as --input, refuse unless --force
-    // is given.
+    // A .frts file always begins with the "FRT7\x07" magic. Refuse to
+    // double-wrap unless --force is given.
     if !args.force && looks_like_fortis_binary(&plaintext) {
         bail!(
             "input appears to be an already-encrypted FORTIS envelope.\n\
@@ -506,12 +423,11 @@ pub fn cmd_encrypt_file(args: EncryptFileArgs) -> Result<()> {
     combined.extend_from_slice(mime.as_bytes());
     combined.extend_from_slice(&(plaintext.len() as u32).to_be_bytes());
     combined.extend_from_slice(&plaintext);
-    // plaintext is no longer needed — Zeroizing drops it on scope exit.
+    // plaintext is no longer needed; Zeroizing drops it on scope exit.
 
-    // Do NOT print the input filename to stderr. The filename is itself
-    // sensitive metadata — it can reveal the operation type, the unit,
-    // the date, etc. The operator knows what they encrypted; printing it
-    // to a terminal log that may be captured is unacceptable.
+    // Do not print the input filename to stderr. Filenames are sensitive
+    // metadata: operation type, unit, date. The operator knows what they
+    // encrypted.
     eprintln!("[fortis] Encrypting file…");
     let t0 = std::time::Instant::now();
     // Catch InputAlreadyEncrypted from envelope.rs.
@@ -610,9 +526,8 @@ pub struct DecryptFileArgs {
 }
 
 pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
-    // Use the TOCTOU-safe bounded reader. `env` is wrapped in
-    // `Zeroizing` so it is wiped on Drop (including the Err-return path,
-    // since Drop runs during unwinding).
+    // Use the TOCTOU-safe bounded reader. env is Zeroizing and wiped on
+    // Drop, including the Err-return path.
     let env: Zeroizing<Vec<u8>> = open_and_read_bounded(&args.input, MAX_INPUT_SIZE, "input")?;
     let passphrase = get_passphrase(&args.pass_file, &args.pass_fd, "Passphrase: ")?;
 
@@ -627,13 +542,12 @@ pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
     {
         Ok(c) => c,
         Err(_) => {
-            // Returning `Err` (not `std::process::exit(1)`) ensures Drop
-            // impls run: the `env` buffer (ciphertext) is wiped. main()
-            // prints only the top-level Display message.
+            // Return Err so Drop wipes env. main() prints only the
+            // top-level Display message.
             bail!("decryption failed — wrong passphrase or corrupted file");
         }
     };
-    // `env` is no longer needed — drop to wipe before parsing metadata.
+    // env is no longer needed; drop to wipe before parsing metadata.
     drop(env);
 
     // Parse metadata prefix
@@ -653,9 +567,8 @@ pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
     }
     let name = String::from_utf8_lossy(&combined[o..o + name_len]).to_string();
     o += name_len;
-    // Boundary check before reading mime_len: the previous `o + name_len > combined.len()`
-    // check accepts `o + name_len == combined.len()`, leaving no room for the 4-byte
-    // mime_len field and causing an index-out-of-bounds panic on the next read.
+    // Boundary check: o + name_len == combined.len() would leave no
+    // room for the 4-byte mime_len field, panicking on the next read.
     if o + 4 > combined.len() {
         bail!("corrupted file metadata");
     }
@@ -671,7 +584,7 @@ pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
     }
     let _mime = String::from_utf8_lossy(&combined[o..o + mime_len]).to_string();
     o += mime_len;
-    // Boundary check before reading orig_size (same rationale as above).
+    // Same boundary check before reading orig_size.
     if o + 4 > combined.len() {
         bail!("corrupted file metadata");
     }
@@ -684,9 +597,8 @@ pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
     o += 4;
     let content = &combined[o..];
     if content.len() != orig_size {
-        // Use a uniform "bad" message: leaking orig_size and
-        // content.len() could reveal structural information about the
-        // decrypted file to a terminal-log adversary.
+        // Use a uniform "bad" message; leaking orig_size vs content.len()
+        // reveals structural information about the decrypted file.
         bail!("bad");
     }
 
@@ -705,11 +617,11 @@ pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
             }
         }
     }
-    // Refuse to overwrite an existing output file unless --force is given.
-    // This blocks a crafted-.frts clobber attack: an adversary who knows
-    // the passphrase can craft a file whose embedded filename matches a
-    // victim file in the working directory, then trick the user into
-    // running `fortis decrypt-file -i malicious.frts`.
+    // Refuse to overwrite an existing output file unless --force is
+    // given. Blocks a crafted-.frts clobber attack: an adversary who
+    // knows the passphrase crafts a file whose embedded filename
+    // matches a victim in the working directory, then tricks the user
+    // into running `fortis decrypt-file -i malicious.frts`.
     if out_path.exists() && !args.force {
         bail!(
             "output file '{}' already exists — use --force to overwrite",
@@ -718,11 +630,9 @@ pub fn cmd_decrypt_file(args: DecryptFileArgs) -> Result<()> {
     }
     // Use atomic write with randomized temp file name.
     write_atomic(&out_path, content)?;
-    // Do NOT print the output path or elapsed time. The path reveals
-    // the decrypted filename (which itself may be sensitive), and
-    // elapsed time reveals the KDF preset used by the encryptor. The
-    // operator can `ls` the output directory if they need to confirm
-    // the file was written.
+    // Do not print the output path or elapsed time. The path reveals
+    // the decrypted filename and elapsed time reveals the KDF preset.
+    // The operator can `ls` the output directory to confirm.
     eprintln!("[fortis] Decrypted.");
     Ok(())
 }
@@ -746,23 +656,19 @@ pub struct ShareSplitArgs {
 pub fn cmd_share_split(args: ShareSplitArgs) -> Result<()> {
     let secret: Zeroizing<Vec<u8>> = read_input(&args.input)?;
     let shares = shamir::split(&secret, args.threshold, args.total)?;
-    // Do NOT print N (total) or the share index in the human-readable
-    // header. A header like `=== Share {i}/{N} (x={x}) ===` would reveal
-    // the total number of shares to anyone reading the terminal log. The
-    // share data itself already contains the x-coordinate (byte 1 of each
-    // share), so repeating it in the header is redundant and the total N
-    // is a metadata leak. The operator can label shares offline if needed.
+    // Do not print N or the share index in the header. A header like
+    // `=== Share {i}/{N} ===` would reveal the total share count to
+    // terminal-log readers. The share data already contains x at byte 1;
+    // the operator can label shares offline.
     for share in shares.iter() {
         let armored = armor::armor(ARMOR_SHARE, share);
         println!("=== FORTIS Share ===");
         println!("{}", armored);
         println!();
     }
-    // Do NOT print N or K to stderr. A message like `Split into {N}
-    // shares (threshold {K})` reveals both the total share count and
-    // the quorum threshold to terminal-log adversaries. Print only a
-    // generic success message. The operator knows N and K (they
-    // specified them on the command line).
+    // Do not print N or K to stderr. A message like `Split into {N}
+    // shares (threshold {K})` reveals both counts to terminal-log
+    // readers. The operator specified them on the command line.
     eprintln!("[fortis] Split complete.");
     Ok(())
 }
@@ -774,8 +680,8 @@ pub struct ShareCombineArgs {
     #[arg(short = 's', long = "share")]
     pub shares: Vec<PathBuf>,
 
-    /// Threshold K must be specified by the caller, NOT read from the
-    /// share header (which an attacker could tamper with).
+    /// Threshold K from the caller, not from the share header (which an
+    /// attacker could tamper with).
     #[arg(short = 'k', long, default_value_t = 2)]
     pub threshold: u8,
 
@@ -784,11 +690,10 @@ pub struct ShareCombineArgs {
 }
 
 pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
-    // Validate threshold up front. Deferring all validation to
-    // shamir::combine would print a hardcoded "need at least 2 shares"
-    // message that leaks the internal minimum. We validate the
-    // threshold range here and use the caller's threshold for the
-    // share-count check below.
+    // Validate threshold up front. Deferring to shamir::combine would
+    // print a hardcoded "need at least 2 shares" message leaking the
+    // internal minimum. Use the caller's threshold for the share-count
+    // check below.
     if !(2..=10).contains(&args.threshold) {
         bail!("bad");
     }
@@ -806,14 +711,12 @@ pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
             if n == 0 {
                 break;
             }
-            // Avoid per-iteration String allocation that is not
-            // zeroized. We push the raw bytes directly into the
-            // Zeroizing<String> via push_str after a single lossy
-            // conversion. The intermediate Cow from from_utf8_lossy is
-            // short-lived (dropped at the end of this expression) but
-            // its owned variant (if any) is NOT zeroized — accepted as
-            // a minor residual leak since the data is share material
-            // (not the secret itself) and the window is one iteration.
+            // Push bytes directly into the Zeroizing<String> via a
+            // single from_utf8_lossy to avoid per-iteration allocation.
+            // The intermediate Cow is short-lived; its owned variant is
+            // not zeroized. Accepted as a minor residual leak: the data
+            // is share material, not the secret, and the window is one
+            // iteration.
             input.push_str(&String::from_utf8_lossy(&chunk[..n]));
             if input.len() > MAX_INPUT_SIZE {
                 bail!(
@@ -846,11 +749,10 @@ pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
                 let bytes = armor::dearmor_with_label(&current, "FORTIS SHARE")?;
                 share_blobs.push(bytes);
                 current.clear();
-                // Cap the number of shares at 10 (matches the max N
-                // allowed by shamir::split). An attacker who pipes
-                // millions of fake shares through stdin could otherwise
-                // exhaust memory and CPU before the threshold check
-                // rejects the combine.
+                // Cap shares at 10, matching shamir::split's max N.
+                // An attacker piping millions of fake shares through
+                // stdin could otherwise exhaust memory and CPU before
+                // the threshold check rejects the combine.
                 if share_blobs.len() > 10 {
                     bail!("too many shares (max 10)");
                 }
@@ -858,8 +760,8 @@ pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
                 current.push_str(trimmed);
                 current.push('\n');
             }
-            // Lines outside any BEGIN..END block are silently ignored
-            // (allows for human-readable comments between shares).
+            // Lines outside BEGIN..END blocks are silently ignored,
+            // allowing human-readable comments between shares.
         }
         if in_block {
             // Unterminated BEGIN block.
@@ -873,46 +775,41 @@ pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
         }
         for path in &args.shares {
             // Use the TOCTOU-safe bounded reader. Share files are
-            // secret material (K shares reconstruct the secret), so we
-            // also wrap the read data in Zeroizing.
+            // secret material: K shares reconstruct the secret. Wrap
+            // the read data in Zeroizing.
             let content_bytes: Zeroizing<Vec<u8>> =
                 open_and_read_bounded(path, MAX_INPUT_SIZE, "share")?;
-            // Convert to String for the armor parser. The String is
-            // short-lived; we wipe it via Zeroizing's Drop.
+            // Convert to String for the armor parser, wrapped in
+            // Zeroizing so it is wiped on drop via volatile writes.
             let content = String::from_utf8_lossy(&content_bytes).into_owned();
             let content_z: Zeroizing<String> = Zeroizing::new(content);
             let bytes = armor::dearmor_with_label(&content_z, "FORTIS SHARE")?;
-            // Zeroizing::drop wipes the String via volatile writes; no
-            // manual `unsafe` wipe is needed (and a manual `*b = 0` loop
-            // would be subject to LLVM dead-store elimination anyway).
             drop(content_z);
             share_blobs.push(bytes);
         }
     }
     // Check against the caller's threshold, not a hardcoded "2". A
-    // hardcoded `share_blobs.len() < 2` would accept fewer shares than
-    // the threshold and let shamir::combine detect the mismatch,
-    // leaking the hardcoded minimum.
+    // hardcoded `< 2` would let shamir::combine detect the mismatch
+    // and leak the hardcoded minimum.
     if share_blobs.len() < args.threshold as usize {
         bail!("bad");
     }
-    // Defensive re-check (should never trigger given the caps above,
-    // but defense in depth).
+    // Defensive re-check; should never trigger given the caps above.
     if share_blobs.len() > 10 {
         bail!("too many shares (max 10)");
     }
     // Pass the caller-specified threshold, not from shares.
     let secret = shamir::combine(&share_blobs, args.threshold)?;
 
-    // Wipe share blobs — they are secret material.
+    // Wipe share blobs; they are secret material.
     for blob in share_blobs.iter_mut() {
         use zeroize::Zeroize;
         blob.zeroize();
     }
     write_output(&args.output, &secret)?;
-    // Do NOT print K or the share count to stderr. A message like
-    // `Reconstructed from {K} shares (threshold {K})` reveals the
-    // quorum threshold to terminal-log adversaries.
+    // Do not print K or the share count to stderr. A message like
+    // `Reconstructed from {K} shares` reveals the quorum threshold to
+    // terminal-log readers.
     eprintln!("[fortis] Reconstructed.");
     Ok(())
 }
@@ -921,35 +818,20 @@ pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Sanitize a filename extracted from ciphertext to prevent path traversal.
+/// Sanitize a filename extracted from ciphertext to prevent path
+/// traversal. An attacker who can craft a ciphertext can embed a
+/// filename like `../../../etc/cron.d/backdoor`; without sanitization
+/// the decrypted content is written to that path.
 ///
-/// An attacker who can craft a ciphertext (e.g., a coerced user is forced
-/// to decrypt an attacker-crafted file) can embed a malicious filename
-/// like `../../../etc/cron.d/backdoor`. Without sanitization, the
-/// decrypted content is written to that path → RCE.
-///
-/// This function:
-///   1. Rejects any path separators (`/`, `\`, U+FF0F fullwidth slash,
-///      U+2044 fraction slash).
-///   2. Rejects `..` components.
-///   3. Rejects absolute paths.
-///   4. Rejects control characters (0x00-0x1F, 0x7F-0x9F).
-///   5. Rejects Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
-///   6. Rejects Unicode bidi override characters (U+202A-U+202E, U+2066-U+2069)
-///      — these can cause display-time confusion where the filename appears
-///      as one thing but is actually another (e.g., "txt.exe" displayed as
-///      "txt.exe" with hidden ".bat" prefix).
-///   7. Rejects zero-width characters (U+200B-U+200F, U+FEFF) — these can
-///      create visually identical but distinct filenames, used for phishing
-///      and to bypass "don't overwrite" checks.
-///   8. Rejects trailing dots and spaces (Windows strips these, allowing
-///      "secret.txt." to collide with "secret.txt").
-///   9. Truncates to 255 bytes (filesystem limit), on a UTF-8 char boundary.
-///  10. Falls back to "decrypted.bin" if the filename is empty/invalid.
+/// Rejects path separators including Unicode lookalikes, `..` components,
+/// absolute paths, control chars, Windows reserved names, bidi override
+/// and zero-width characters, and trailing dots/spaces. Truncates to
+/// 255 bytes on a UTF-8 boundary. Falls back to "decrypted.bin" if the
+/// filename is empty or invalid.
 fn sanitize_filename(name: &str) -> String {
-    // Strip path separators FIRST, including Unicode lookalikes. Use the
-    // basename (last path component) — this rejects any embedded `/`,
-    // `\`, or lookalike that would split the path.
+    // Strip path separators first, including Unicode lookalikes. Take
+    // the basename: this rejects any embedded `/`, `\`, or lookalike
+    // that would split the path.
     let basename: String = name
         .rsplit(|c| {
             c == '/' || c == '\\'
@@ -970,13 +852,11 @@ fn sanitize_filename(name: &str) -> String {
         return "decrypted.bin".to_string();
     }
 
-    // Filter out dangerous Unicode categories AND ASCII characters that
-    // are illegal in Windows filenames. Even though Fortis is Unix-only
-    // (enforced by compile_error!), decrypted files may be transferred
-    // to Windows machines via USB or network share. A filename like
-    // "report:secret" would silently truncate to "report" on Windows
-    // (NTFS ADS), causing data loss. "NUL.txt" would be rejected by
-    // Windows but the operator may not understand why.
+    // Filter out dangerous Unicode and ASCII chars illegal in Windows
+    // filenames. Fortis is Unix-only, but decrypted files may be
+    // transferred to Windows via USB or network share. "report:secret"
+    // would truncate to "report" on Windows NTFS ADS; "NUL.txt" would
+    // be rejected with no clear reason.
     let cleaned: String = basename
         .chars()
         .filter(|c| {
@@ -1013,15 +893,10 @@ fn sanitize_filename(name: &str) -> String {
             if *c == '\u{FF0F}' || *c == '\u{2044}' || *c == '\u{FF3C}' {
                 return false;
             }
-            // Reject Windows-illegal ASCII chars. Even though Fortis is
-            // Unix-only, decrypted files may be transferred to Windows.
-            // Rejecting them now prevents silent data loss.
-            //   : → NTFS Alternate Data Stream separator
-            //   * → wildcard (cmd.exe)
-            //   ? → wildcard (cmd.exe)
-            //   " → quote (cmd.exe, also illegal in NTFS)
-            //   < > → redirect operators (cmd.exe, illegal in NTFS)
-            //   | → pipe operator (cmd.exe, illegal in NTFS)
+            // Reject Windows-illegal ASCII chars. Fortis is Unix-only
+            // but decrypted files may be transferred to Windows. The
+            // chars below are wildcards, redirects, quotes, pipe, or
+            // NTFS Alternate Data Stream separators.
             if *c == ':'
                 || *c == '*'
                 || *c == '?'
@@ -1040,8 +915,8 @@ fn sanitize_filename(name: &str) -> String {
         return "decrypted.bin".to_string();
     }
 
-    // Reject trailing dots and spaces (Windows strips them, allowing
-    // "secret.txt." to collide with "secret.txt").
+    // Reject trailing dots and spaces. Windows strips these, so
+    // "secret.txt." would collide with "secret.txt".
     let trimmed = cleaned.trim_end_matches(['.', ' ']);
     if trimmed.is_empty() {
         return "decrypted.bin".to_string();
@@ -1090,82 +965,68 @@ fn sanitize_filename(name: &str) -> String {
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
         "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
-    // Check the uppercased stem (without extension) against the reserved
-    // list. For "NUL.txt" the stem is "NUL" — matches.
+    // Check the uppercased stem without extension against the reserved
+    // list. For "NUL.txt" the stem is "NUL" and matches.
     if reserved.contains(&stem) {
         return format!("fortis_{}", s);
     }
     s
 }
 
-/// `--pass` is intentionally ABSENT from the CLI struct, so clap rejects
-/// it at parse time before any String allocation occurs. The passphrase
-/// can come from:
-///   1. --pass-fd <N>      — read from file descriptor N (most secure for scripting)
-///   2. --pass-file <path> — read from a file (path appears in cmdline, but not the passphrase)
-///   3. FORTIS_PASS env var — read from environment (not in cmdline, but in /proc/PID/environ)
-///   4. Interactive prompt  — most secure for interactive use (never leaves terminal)
+/// `--pass` is intentionally absent from the CLI struct so clap rejects
+/// it at parse time. Passphrase sources, in priority order: --pass-fd,
+/// --pass-file, FORTIS_PASS env var, interactive prompt.
 fn get_passphrase(
     pass_file: &Option<PathBuf>,
     pass_fd: &Option<u32>,
     prompt: &str,
 ) -> Result<SecretBytes> {
-    // Priority 1: --pass-fd (read from file descriptor — most secure for scripting)
+    // Priority 1: --pass-fd. Most secure for scripting.
     if let Some(fd) = pass_fd {
         return read_passphrase_from_fd(*fd);
     }
 
-    // Priority 2: --pass-file (read from a file — path in cmdline, but not passphrase)
+    // Priority 2: --pass-file. Path in cmdline, not the passphrase.
     if let Some(path) = pass_file {
         return read_passphrase_from_file(path);
     }
 
     // Priority 3: FORTIS_PASS environment variable.
     //
-    // std::env::var and std::env::remove_var are NOT thread-safe — they
-    // mutate a shared global environment. Rust marks them `unsafe` to
-    // force the caller to acknowledge this. In Fortis, main() is
-    // single-threaded at this point (no threads have been spawned yet),
-    // so the unsafe is sound. If Fortis ever becomes multi-threaded
-    // (e.g., for parallel Argon2id lanes via rayon), this code MUST be
-    // moved to a single-threaded initialization phase.
+    // std::env::var and std::env::remove_var mutate a shared global
+    // environment, so Rust marks them unsafe. main() is single-threaded
+    // here, so the unsafe is sound. If Fortis ever becomes multi-threaded,
+    // move this to a single-threaded init phase.
     //
-    // SECURITY caveat about /proc/PID/environ: On Linux, /proc/PID/environ
-    // contains a SNAPSHOT of the environment at execve time.
-    // std::env::remove_var updates the in-memory environ but does NOT
-    // update /proc/PID/environ. The env var remains visible to ANY
-    // process with the same UID for the ENTIRE lifetime of the process.
-    // Prefer --pass-fd or interactive prompt. The env var is provided as
-    // a convenience for CI/testing ONLY, and we print a warning when
-    // it's used.
+    // /proc/PID/environ on Linux is a snapshot taken at execve time.
+    // std::env::remove_var updates the in-memory environ but not
+    // /proc/PID/environ, so the var stays visible to same-UID processes
+    // for the process lifetime. Prefer --pass-fd or interactive prompt.
+    // The env var is a CI/testing convenience; we warn when it is used.
     if let Ok(p) = std::env::var("FORTIS_PASS") {
         eprintln!("[fortis] WARNING: FORTIS_PASS env var is visible in /proc/PID/environ");
         eprintln!("[fortis]          to ALL processes with the same UID for the process lifetime.");
         eprintln!("[fortis]          For production use, prefer --pass-fd or interactive prompt.");
-        // Remove the env var from this process AND from any child
-        // processes we might spawn, before we use it.
-        // SAFETY: single-threaded context (no threads spawned yet).
-        // NOTE: This does NOT remove it from /proc/PID/environ — see above.
+        // Remove the env var from this process and any children before use.
+        // This does not remove it from /proc/PID/environ; see above.
+        // SAFETY: single-threaded context, no threads spawned yet.
         unsafe {
             std::env::remove_var("FORTIS_PASS");
         }
-        // Wrap the String in Zeroizing<String> so the heap buffer is
-        // wiped when we are done.
+        // Wrap in Zeroizing<String> so the heap buffer is wiped on drop.
         let z: Zeroizing<String> = Zeroizing::new(p);
         let sb = SecretBytes::from_slice(z.as_bytes());
-        // Zeroizing::drop on `z` (at end of scope) wipes the String via
-        // volatile writes; no manual `unsafe` wipe is needed.
         return Ok(sb);
     }
 
-    // Priority 4: interactive prompt (most secure for interactive use)
+    // Priority 4: interactive prompt.
     memory::read_passphrase(prompt).map_err(|e| anyhow!("passphrase read failed: {}", e))
 }
 
 /// Read the decoy passphrase from --decoy-pass-fd or --decoy-pass-file.
 /// Mirrors `get_passphrase` but never reads from a CLI string and never
-/// falls back to interactive prompt (the decoy passphrase is optional
-/// and must be supplied explicitly).
+/// falls back to interactive prompt; the decoy is optional and must be
+/// supplied explicitly.
 fn get_decoy_passphrase(
     decoy_pass_file: &Option<PathBuf>,
     decoy_pass_fd: &Option<u32>,
@@ -1179,16 +1040,13 @@ fn get_decoy_passphrase(
     bail!("--decoy requires --decoy-pass-file or --decoy-pass-fd");
 }
 
-/// Read a passphrase from a file descriptor (one byte at a time into a
-/// pre-allocated mlock'd SecretBytes buffer).
+/// Read a passphrase from a file descriptor, one byte at a time into a
+/// pre-allocated mlocked SecretBytes. Bounded to MAX_PASS_LEN bytes so a
+/// malicious fd writer cannot OOM the process.
 ///
-/// Bounded read — never reads more than MAX_PASS_LEN bytes from the fd,
-/// preventing a malicious fd writer from causing OOM.
-///
-/// Polls the fd with a 60-second timeout. A blocked `file.read(&mut byte)`
-/// on a pipe whose writer never closes would leave the operator stuck
-/// with no way to cancel except SIGKILL. We bail with an error if no
-/// data arrives within 60 seconds.
+/// Polls the fd with a 60-second timeout. A blocked `file.read` on a
+/// pipe whose writer never closes would leave the operator stuck without
+/// SIGKILL; we bail instead.
 const PASSPHRASE_FD_TIMEOUT_SECS: i32 = 60;
 
 fn read_passphrase_from_fd(fd: u32) -> Result<SecretBytes> {
@@ -1201,9 +1059,8 @@ fn read_passphrase_from_fd(fd: u32) -> Result<SecretBytes> {
     let mut len = 0usize;
     let mut byte = [0u8; 1];
 
-    // Create the File wrapper ONCE before the loop, then forget it
-    // AFTER the loop. We use ManuallyDrop to prevent the File from
-    // closing the fd (caller owns it).
+    // Create the File wrapper once and ManuallyDrop it so we do not
+    // close the fd; the caller owns it.
     use std::mem::ManuallyDrop;
     let mut file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd_i32) });
 
@@ -1245,26 +1102,21 @@ fn read_passphrase_from_fd(fd: u32) -> Result<SecretBytes> {
             Err(_) => return Err(anyhow::anyhow!("bad")),
         }
     }
-    // file is ManuallyDrop — the fd is NOT closed (caller owns it).
+    // file is ManuallyDrop; the fd is not closed, caller owns it.
     let passphrase = SecretBytes::from_slice(&buf.as_bytes()[..len]);
     buf.wipe();
-    // Zeroize the 1-byte stack buffer that held the last passphrase byte
-    // read. Without this, `byte[0]` lingers on the stack frame until the
-    // function returns and the stack slot is reused by the caller — a
-    // small but real leak of the final passphrase character.
+    // Zeroize the 1-byte stack buffer that held the last passphrase
+    // byte. Without this, byte[0] lingers on the stack until the slot
+    // is reused by the caller.
     use zeroize::Zeroize;
     byte.zeroize();
     Ok(passphrase)
 }
 
-/// Read a passphrase from a file (one line, trailing newline stripped).
-///
-/// Bounded read — checks file size before read_to_string, and refuses
-/// files larger than MAX_PASS_LEN+1 (allowing for a trailing newline).
-/// This prevents OOM via a malicious pass-file.
-///
-/// TOCTOU-safe: opens the file ONCE, fstats the fd, and reads from the
-/// same fd.
+/// Read a passphrase from a file: one line, trailing newline stripped.
+/// Checks file size before read_to_string and refuses files larger than
+/// MAX_PASS_LEN+1 to prevent OOM. TOCTOU-safe: opens once, fstats the
+/// fd, reads from the same fd.
 fn read_passphrase_from_file(path: &PathBuf) -> Result<SecretBytes> {
     // Single open + fstat + read from the same fd.
     let file = std::fs::File::open(path).map_err(|e| anyhow!("--pass-file open failed: {}", e))?;
@@ -1279,8 +1131,7 @@ fn read_passphrase_from_file(path: &PathBuf) -> Result<SecretBytes> {
         bail!("--pass-file too large (max {} bytes)", memory::MAX_PASS_LEN);
     }
     let mut content = String::new();
-    // Take ownership of the file in a Read wrapper. Read from the SAME
-    // fd that we fstat'd — no TOCTOU.
+    // Read from the same fd that we fstat'd; no TOCTOU.
     let mut reader = file;
     reader
         .read_to_string(&mut content)
@@ -1292,46 +1143,37 @@ fn read_passphrase_from_file(path: &PathBuf) -> Result<SecretBytes> {
         line.pop();
     }
     if line.len() > memory::MAX_PASS_LEN {
-        // Truncate defensively (should not happen given the size check above).
+        // Defensive truncation; should not trigger given the size check.
         line.truncate(memory::MAX_PASS_LEN);
     }
     let sb = SecretBytes::from_slice(line.as_bytes());
-    // Zeroizing::drop on `line` (at end of scope) wipes the String via
-    // volatile writes; no manual `unsafe` wipe is needed.
+    // Zeroizing::drop wipes the String via volatile writes.
     Ok(sb)
 }
 
-/// Maximum input size to prevent memory-exhaustion DoS. Bumped from
-/// 300 MiB to 512 MiB: a 256 MiB binary envelope (the legitimate max)
-/// becomes ~341 MiB after base64 encoding (+33% overhead). With the
-/// BEGIN/END armor headers and 64-char-per-line wrapping, an armored
-/// 256 MiB ciphertext is ~342 MiB. The old 300 MiB limit would reject
-/// legitimate large armored messages. 512 MiB provides ample headroom.
+/// Max input size, anti-DoS bound. A 256 MiB binary envelope becomes
+/// ~342 MiB once base64-armored with BEGIN/END headers and 64-char
+/// line wrapping, so the limit must exceed the 256 MiB ciphertext cap.
 const MAX_INPUT_SIZE: usize = 512 * 1024 * 1024;
 
 /// Write to a temp file with a randomized name, then atomically rename
 /// to the final path. The random name prevents symlink attacks where an
-/// attacker pre-creates a symlink at the predictable `.frts.tmp` path
+/// attacker pre-creates a symlink at a predictable `.frts.tmp` path
 /// pointing to a privileged file.
 ///
-/// The temp file is created with mode 0600 on Unix so that no other user
-/// can read the (possibly sensitive) output. The file is created with
-/// 0600 FROM THE START via `OpenOptions::mode(0o600)`, eliminating the
-/// previous race window where the file briefly existed with default
-/// umask (typically 0644) before `set_permissions` was called. The final
-/// file (after rename) inherits these permissions.
+/// The temp file is created with mode 0600 from the start via
+/// `OpenOptions::mode(0o600)`, so there is no window where the file
+/// exists with default umask. The final file inherits these permissions.
 ///
-/// The temp file is fsync'd before the rename, and the parent directory
-/// is fsync'd after the rename, ensuring the data is on disk before we
-/// report success. Without this, a power loss after `rename` could leave
-/// the file empty or corrupt.
+/// fsync the temp file before the rename and the parent directory after,
+/// so the data is durable before success is reported. Without this a
+/// power loss after rename could leave the file empty or corrupt.
 fn write_atomic(final_path: &std::path::Path, data: &[u8]) -> Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
-    // 16 bytes of OsRng entropy (128 bits) plus pid+timestamp gives
-    // well over 64 bits of unpredictability for the temp suffix, which
-    // is sufficient to defeat predictive-symlink attacks on local
-    // filesystems. The temp file is created with create_new(true) so an
-    // attacker cannot pre-create it (symlink or otherwise).
+    // 128 bits of OsRng entropy plus pid and timestamp gives plenty of
+    // unpredictability for the temp suffix, defeating predictive-symlink
+    // attacks on local filesystems. create_new(true) prevents an attacker
+    // from pre-creating the file.
     let mut rng_buf = [0u8; 16];
     crate::crypto::rng::fill(&mut rng_buf);
     let ts = SystemTime::now()
@@ -1346,10 +1188,8 @@ fn write_atomic(final_path: &std::path::Path, data: &[u8]) -> Result<()> {
         .unwrap_or(std::path::Path::new("."))
         .join(tmp_name);
 
-    // Create the temp file with 0600 FROM THE START. Using
-    // OpenOptions::mode() ensures the file is created with the correct
-    // permissions atomically — there is no window where the file exists
-    // with default umask (0644) permissions.
+    // Create with 0600 from the start via OpenOptions::mode(). No window
+    // where the file exists with default umask.
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -1366,7 +1206,7 @@ fn write_atomic(final_path: &std::path::Path, data: &[u8]) -> Result<()> {
         // leave the file empty.
         file.sync_all()
             .map_err(|e| anyhow!("temp file fsync failed: {}", e))?;
-        // Drop the file handle before rename (Windows requires this).
+        // Drop the file handle before rename; Windows requires this.
         drop(file);
     }
     #[cfg(not(unix))]
@@ -1375,16 +1215,14 @@ fn write_atomic(final_path: &std::path::Path, data: &[u8]) -> Result<()> {
     }
 
     if let Err(e) = std::fs::rename(&tmp_path, final_path) {
-        // Retry the temp file cleanup before bailing. On a full disk or
-        // read-only filesystem, the temp file containing encrypted
-        // plaintext would otherwise remain on disk indefinitely. We
-        // retry up to 3 times with short delays, and if all retries
-        // fail, we panic with a clear message so the operator knows to
-        // manually shred the temp file.
+        // Retry temp-file cleanup before bailing. On a full or read-only
+        // filesystem, the temp file containing encrypted plaintext
+        // would otherwise remain on disk. Three retries with short
+        // delays; if all fail, panic with a clear message so the
+        // operator can manually shred the temp file.
         let mut last_remove_err = None;
         for attempt in 0..3 {
-            // Brief delay between retries to allow the filesystem to
-            // recover from transient failures (e.g., NFS lag).
+            // Brief delay between retries for transient failures like NFS lag.
             std::thread::sleep(std::time::Duration::from_millis(50 * (1 << attempt)));
             match std::fs::remove_file(&tmp_path) {
                 Ok(()) => {
@@ -1399,11 +1237,10 @@ fn write_atomic(final_path: &std::path::Path, data: &[u8]) -> Result<()> {
         if let Some(re) = last_remove_err {
             // Could not remove the temp file. The encrypted plaintext is
             // still on disk at tmp_path. Panic so the operator sees the
-            // path and can manually shred it. The custom panic hook
-            // (main.rs) will print a generic message; we print the temp
-            // path HERE before panicking so the operator can shred it.
-            // The path itself is not secret (it contains pid,
-            // timestamp, and a random suffix — no key material).
+            // path and can shred it. main.rs's panic hook prints a
+            // generic message, so we print the temp path here first.
+            // The path is not secret: it contains pid, timestamp, and a
+            // random suffix, no key material.
             eprintln!(
                 "[fortis] FATAL: atomic rename failed ({}) AND temp file cleanup failed ({}).",
                 e, re
@@ -1433,7 +1270,7 @@ fn write_atomic(final_path: &std::path::Path, data: &[u8]) -> Result<()> {
         }
     }
 
-    // Also set 0600 on the final path (defense in depth).
+    // Also set 0600 on the final path.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1481,20 +1318,16 @@ fn write_output(path: &Option<PathBuf>, data: &[u8]) -> Result<()> {
             write_atomic(p, data)?;
         }
         None => {
-            // Refuse to write binary data to a TTY. Writing binary bytes
-            // to a terminal may:
-            //   - corrupt the terminal (lost cursor, wrong colors)
-            //   - execute escape-sequence payloads (e.g., the "DECEMBER"
-            //     attack where the terminal title is changed)
-            //   - in rare cases, trigger terminal emulator
-            //     vulnerabilities (e.g., xterm CSI sequences)
-            // The operator should explicitly redirect to a file
-            // (`fortis encrypt -o file.frts`) or pipe to another command.
+            // Refuse to write binary data to a TTY. Binary bytes can
+            // corrupt the terminal, execute escape-sequence payloads
+            // like the "DECEMBER" title-change attack, or trigger
+            // terminal emulator bugs. The operator should redirect to a
+            // file via --output or pipe to another command.
             use std::io::IsTerminal;
             if io::stdout().is_terminal() {
                 // Allow armored output (printable ASCII only) but refuse
-                // raw binary. We check the first 16 bytes for
-                // non-printable chars as a heuristic.
+                // raw binary. Heuristic: check the first 64 bytes for
+                // non-printable chars.
                 let looks_binary = data.iter().take(64).any(|&b| {
                     b != b'\n' && b != b'\r' && b != b'\t' && !(0x20..=0x7E).contains(&b)
                 });
@@ -1505,12 +1338,10 @@ fn write_output(path: &Option<PathBuf>, data: &[u8]) -> Result<()> {
                     );
                 }
             }
-            // io::stdout() is buffered (LineWriter when TTY, BufWriter
-            // when not). The buffer holds a copy of the data (which may
-            // be plaintext for `fortis decrypt` or ciphertext for `fortis
-            // encrypt`) and is NOT zeroized on flush. A future hardening
-            // pass could use a Zeroizing-wrapped writer. For now, the
-            // buffer is small (default 8 KiB) and is overwritten on the
+            // io::stdout() is buffered and the buffer holds a copy of
+            // the data that is not zeroized on flush. A future hardening
+            // pass could use a Zeroizing-wrapped writer. For now the
+            // buffer is small, 8 KiB by default, and overwritten on the
             // next write.
             io::stdout().write_all(data)?;
         }
