@@ -856,31 +856,27 @@ pub fn run_all_selftests() -> Result<()> {
         Ok(())
     });
 
-    test!(
-        "Round-trip: plaintext sized to one chunk minus framing",
-        {
-            // pad_plaintext adds a 4-byte length prefix, so a plaintext of
-            // CHUNK_SIZE - 4 bytes fills exactly one chunk BEFORE the
-            // randomized padding is added. After padding the chunk count
-            // may be 1 or 2 depending on the jitter, so this test verifies
-            // round-trip correctness, not chunk count.
-            let pt = vec![b'A'; CHUNK_SIZE - 4];
-            let env = envelope::encrypt_envelope(
-                &pt,
-                SecretBytes::from_slice(b"exact-1-chunk-pass"),
-                None,
-                None,
-                crate::crypto::constants::KdfPreset::Standard,
-                false,
-            )?;
-            let dec =
-                envelope::decrypt_envelope(&env, SecretBytes::from_slice(b"exact-1-chunk-pass"))?;
-            if dec.as_slice() != pt.as_slice() {
-                bail!("round-trip mismatch");
-            }
-            Ok(())
+    test!("Round-trip: plaintext sized to one chunk minus framing", {
+        // pad_plaintext adds a 4-byte length prefix, so a plaintext of
+        // CHUNK_SIZE - 4 bytes fills exactly one chunk BEFORE the
+        // randomized padding is added. After padding the chunk count
+        // may be 1 or 2 depending on the jitter, so this test verifies
+        // round-trip correctness, not chunk count.
+        let pt = vec![b'A'; CHUNK_SIZE - 4];
+        let env = envelope::encrypt_envelope(
+            &pt,
+            SecretBytes::from_slice(b"exact-1-chunk-pass"),
+            None,
+            None,
+            crate::crypto::constants::KdfPreset::Standard,
+            false,
+        )?;
+        let dec = envelope::decrypt_envelope(&env, SecretBytes::from_slice(b"exact-1-chunk-pass"))?;
+        if dec.as_slice() != pt.as_slice() {
+            bail!("round-trip mismatch");
         }
-    );
+        Ok(())
+    });
 
     test!("Round-trip: plaintext sized to exactly CHUNK_SIZE", {
         // CHUNK_SIZE bytes of plaintext + 4-byte framing + randomized
@@ -1452,8 +1448,10 @@ pub fn run_all_selftests() -> Result<()> {
         // If the env var is set in the unit-test environment, that's a
         // hygiene violation — a previous test failed to clean up.
         if std::env::var("FORTIS_ALLOW_NO_MLOCK").is_ok() {
-            bail!("FORTIS_ALLOW_NO_MLOCK is set in the test environment — \
-                  a previous test failed to clean up");
+            bail!(
+                "FORTIS_ALLOW_NO_MLOCK is set in the test environment — \
+                  a previous test failed to clean up"
+            );
         }
         Ok(())
     });

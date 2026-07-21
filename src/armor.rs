@@ -28,8 +28,8 @@
 //! reveals at most structural properties of the ARMORED text (which an
 //! attacker already controls), never plaintext or key material.
 
-use anyhow::{bail, Result};
 use crate::crypto::constants::{ARMOR_FILE, ARMOR_MSG, ARMOR_SHARE};
+use anyhow::{bail, Result};
 
 /// Maximum allowed armored input size. Prevents OOM DoS via a maliciously
 /// large armored blob piped to stdin. 256 MiB covers the largest legitimate
@@ -157,10 +157,7 @@ fn parse_armor_structure(text: &str) -> Result<(String, String)> {
         bail!("bad");
     }
     // Label must be one of the known Fortis labels (defense in depth).
-    if !matches!(
-        begin_label.as_str(),
-        ARMOR_MSG | ARMOR_FILE | ARMOR_SHARE
-    ) {
+    if !matches!(begin_label.as_str(), ARMOR_MSG | ARMOR_FILE | ARMOR_SHARE) {
         bail!("bad");
     }
 

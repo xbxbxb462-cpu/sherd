@@ -748,7 +748,7 @@ mod tests {
             assert_eq!(s[0], SHARE_FORMAT_VERSION);
             // x is a u8 in [1, 255]; the upper bound is automatic (u8 max = 255)
             // but kept here for documentation of the intended range.
-            #[allow(unused_comparisons)]
+            #[allow(unused_comparisons, clippy::absurd_extreme_comparisons)]
             let in_range = s[1] >= 1 && s[1] <= 255;
             assert!(in_range);
         }
@@ -903,7 +903,7 @@ mod tests {
         // a degree-2 polynomial reproduces the degree-2 polynomial
         // exactly (uniqueness of interpolation). The SHA-256 digest
         // matches, and combine returns Ok(secret).
-        let all5: Vec<Vec<u8>> = shares.iter().cloned().collect();
+        let all5: Vec<Vec<u8>> = shares.to_vec();
         let result = combine(&all5, 5);
         assert!(
             result.is_ok(),
@@ -932,8 +932,8 @@ mod tests {
         let mut exp_table = [0u8; 256];
         let mut log_table = [0u8; 256];
         let mut x: u16 = 1;
-        for i in 0..255 {
-            exp_table[i] = x as u8;
+        for (i, slot) in exp_table.iter_mut().enumerate().take(255) {
+            *slot = x as u8;
             log_table[x as usize] = i as u8;
             let mut new_x = (x << 1) ^ x;
             if new_x & 0x100 != 0 {

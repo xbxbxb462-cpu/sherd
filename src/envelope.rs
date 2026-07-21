@@ -550,7 +550,12 @@ fn chunk_aad(
 ) -> Vec<u8> {
     let mut aad = Vec::with_capacity(fixed_header.len() + SALT_LEN + IV_LEN + 4 + 4);
     chunk_aad_into(
-        &mut aad, fixed_header, salt, base_iv, chunk_index, chunk_count,
+        &mut aad,
+        fixed_header,
+        salt,
+        base_iv,
+        chunk_index,
+        chunk_count,
     );
     aad
 }
