@@ -1,4 +1,12 @@
-![](/logo.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/xbxbxb462-cpu/sherd/main/logo.png" alt="sherd" width="200">
+</p>
+
+<p align="center">
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/language-Rust-orange" alt="Rust"></a>
+  <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-brightgreen" alt="Security"></a>
+</p>
 
 # sherd
 
@@ -148,7 +156,7 @@ For non-interactive use, prefer file descriptors (never appear in
 sherd encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.shrd
 ```
 
-`--pass-file <path> is also supported (the path appears in cmdline,
+`--pass-file <path>` is also supported (the path appears in cmdline,
 but the passphrase does not). The `SHERD_PASS` environment variable
 is supported as a CI/testing convenience **with a loud warning**: on
 Linux it remains visible in `/proc/PID/environ` for the entire
@@ -182,7 +190,7 @@ known-answer tests.
   decryption time.
 - **No recursive encryption.** Re-encrypting an already-encrypted
   file is an operational footgun. `sherd encrypt` refuses input that
-  begins with the `SPRD` magic unless you pass `--force`.
+  begins with the `SHRD` magic unless you pass `--force`.
 - **Constant-time operations.** Secret comparisons use
   `subtle::ConstantTimeEq`. GF(256) arithmetic (used by Shamir) is
   branchless.
