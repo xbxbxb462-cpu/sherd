@@ -1,0 +1,66 @@
+[package]
+name = "fortis"
+version = "7.1.0"
+edition = "2021"
+rust-version = "1.74"
+authors = ["Fortis Project"]
+license = "MIT OR Apache-2.0"
+description = "Paranoid-grade symmetric encryption tool with plausible deniability and Shamir secret sharing"
+repository = "https://github.com/xbxbxb462-cpu/fortis"
+keywords = ["crypto", "encryption", "aes-gcm", "argon2", "shamir"]
+categories = ["cryptography", "command-line-utilities"]
+publish = false
+
+# Prevent cargo-auditable from embedding the dependency tree (SBOM) into
+# the binary. The embedded JSON would list every crate name + version,
+# defeating the path/version stripping in .cargo/config.toml.
+[package.metadata]
+auditable = false
+
+[[bin]]
+name = "fortis"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# Use `panic = "unwind"` (not "abort") so that Drop impls on
+# `Zeroizing`/`SecretBytes` buffers run during a panic, wiping secrets
+# from memory before the process exits. With `panic = "abort"` the Drop
+# impls are skipped, leaving passphrases and plaintext keys in RAM
+# until the OS reaps the process — defeating the mlock + zeroize
+# defense-in-depth. The custom panic hook (main.rs) sanitizes stderr.
+panic = "unwind"
+# Strip all symbols at link time. Combined with `debug = false` and the
+# `--remap-path-prefix` flags in `.cargo/config.toml`, this removes
+# developer-machine paths and cargo registry structure from the binary.
+strip = "symbols"
+debug = false
+debug-assertions = false
+overflow-checks = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[dependencies]
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+argon2 = { version = "0.5", features = ["zeroize"] }
+anyhow = "1"
+base64ct = { version = "1", features = ["alloc"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+hkdf = "0.12"
+hmac = "0.12"
+libc = "0.2"
+rand = "0.8"
+rand_core = { version = "0.6", features = ["std"] }
+sha2 = "0.10"
+subtle = "2"
+zeroize = { version = "1", features = ["alloc", "zeroize_derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []

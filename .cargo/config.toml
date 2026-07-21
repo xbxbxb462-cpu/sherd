@@ -1,0 +1,71 @@
+# Build configuration for FORTIS.
+#
+# The rustflags below strip developer-machine paths and cargo registry
+# structure from the compiled binary so that `strings fortis | grep /home/`
+# returns nothing. This prevents an adversary who obtains the binary from
+# learning the developer's home directory, OS username, or exact dependency
+# versions via the registry folder names (e.g. `argon2-0.5.3`).
+#
+# What IS removed:
+#   - /home/z/... prefix (developer home directory)
+#   - /home/z/.cargo/registry/src/index.crates.io-<hash>/ prefix
+#   - /home/z/.cargo prefix
+#   - /home/z/.rustup prefix
+#   - the project's own absolute path
+#   - debug info (debuginfo=0)
+#   - linker symbols (link-args=-Wl,-s)
+#
+# What is NOT removed (cannot be removed without rewriting dependency
+# source code):
+#   - The crate name + version embedded as the folder name, e.g.
+#     `argon2-0.5.3/src/lib.rs`. After remapping, this becomes
+#     `./deps/argon2-0.5.3/src/lib.rs` — the version is still in the
+#     folder name. To remove it entirely you would need to build the
+#     dependencies with a source-filter build script (out of scope).
+#   - Generic type names like `Aes256Gcm`, `Argon2`, `Sha256` — these
+#     are part of the linker-visible type metadata and are required for
+#     monomorphization. They are NOT a meaningful leak: any
+#     cryptographer can identify AES-256-GCM + Argon2id + SHA-256 from
+#     the ciphertext format, tag length, and KDF cost.
+#
+# To verify after a release build:
+#   strings target/release/fortis | grep -iE '(/home/|/Users/|cargo/registry)'
+#   # Expected: no output
+
+[build]
+# Order matters: longest prefixes MUST come first. If a shorter prefix
+# (e.g. /home/z=.) is applied first, it consumes the path before the
+# longer, more specific remaps (e.g. /home/z/.cargo/registry/src/...) get
+# a chance to match.
+#
+# IMPORTANT: do NOT add a trailing slash to the `from` side. rustc treats
+# `--remap-path-prefix=/foo/=bar` and `--remap-path-prefix=/foo=bar`
+# differently; the trailing-slash form frequently fails to match in
+# practice, leaving the original path in the binary.
+rustflags = [
+    # 1. Hide the cargo registry src directory (longest, most specific).
+    #    After remapping: /home/z/.cargo/registry/src/index.crates.io-<hash>/<crate>-<ver>/...
+    #    becomes: deps/io/<crate>-<ver>/...
+    "--remap-path-prefix=/home/z/.cargo/registry/src/index.crates.io-=deps/io",
+    # 2. Hide the cargo registry src prefix (catches any other registry
+    #    mirror hash). After remapping: deps/<rest>
+    "--remap-path-prefix=/home/z/.cargo/registry/src=deps",
+    # 3. Hide the cargo registry root (catches the index, cache, git).
+    "--remap-path-prefix=/home/z/.cargo/registry=./cargo-registry",
+    # 4. Hide the cargo root (covers git checkouts, binary cache, etc.).
+    "--remap-path-prefix=/home/z/.cargo=./cargo",
+    # 5. Hide the rustup toolchain root (covers std library paths).
+    "--remap-path-prefix=/home/z/.rustup=./rustup",
+    # 6. Hide the project's absolute path.
+    "--remap-path-prefix=/home/z/my-project/fortis_project=./src",
+    # 7. Finally, hide the developer's home directory entirely (catch-all
+    #    for anything not matched above).
+    "--remap-path-prefix=/home/z=.",
+    # Strip debug info (no file:line in panic locations).
+    "-C", "debuginfo=0",
+    # Strip symbols at link time.
+    "-C", "link-args=-Wl,-s",
+]
+
+
+

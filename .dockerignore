@@ -1,0 +1,37 @@
+# .dockerignore — keep the Docker build context small and prevent
+# host-specific artifacts from leaking into the container build.
+
+# Rust build artifacts (rebuilt inside the container).
+target/
+
+# Git metadata.
+.git/
+.gitignore
+
+# Editor / OS files.
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE configs.
+.vscode/
+.idea/
+*.iml
+
+# Local cargo cache (the container has its own).
+.cargo/registry/
+.cargo/git/
+
+# Logs and temp files.
+*.log
+*.tmp
+*.bak
+
+# The build script itself (not needed inside the container).
+build-final.sh
+
+# Documentation that does not affect the build.
+*.md
+!README.md
