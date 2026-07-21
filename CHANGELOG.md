@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Closed decoy size leak: both slots are padded to the same randomized
   target length.
 - Closed recursive-encryption footgun: `encrypt_envelope` refuses
-  input that begins with the `SHR1` magic unless `--force` is given.
+  input that begins with the `SHRD `magic unless `--force` is given.
 - Closed memory-protection bypass: `SHERD_ALLOW_NO_MLOCK` is no
   longer honored in release builds.
 - Closed TOCTOU on input files: `open_and_read_bounded` opens the
