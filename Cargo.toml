@@ -3,16 +3,26 @@ name = "sherd"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.74"
-authors = ["sherd"]
+authors = ["The sherd maintainers <security@sherd.dev>"]
 license = "MIT OR Apache-2.0"
-description = "Paranoid-grade symmetric encryption with plausible deniability and Shamir secret sharing"
+description = "Offline single-binary encryption: AES-256-GCM + Argon2id with plausible deniability, X25519 recipients, and Shamir secret sharing"
 repository = "https://github.com/xbxbxb462-cpu/sherd"
+homepage = "https://github.com/xbxbxb462-cpu/sherd"
+documentation = "https://github.com/xbxbxb462-cpu/sherd/blob/main/docs/protocol.md"
+readme = "README.md"
 keywords = ["crypto", "encryption", "aes-gcm", "argon2", "shamir"]
 categories = ["cryptography", "command-line-utilities"]
-publish = false
+publish = true
 
 [package.metadata]
 auditable = false
+
+# cargo-binstall support: lets users run `cargo binstall sherd`
+# and pull the prebuilt release archives instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/sherd-{ target }.tar.gz"
+bin-dir = "sherd-{ target }"
+pkg-fmt = "tgz"
 
 [[bin]]
 name = "sherd"

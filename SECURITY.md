@@ -15,10 +15,8 @@ Instead, report vulnerabilities privately:
 
 1. Open a new **GitHub Security Advisory** via the
    "Security" → "Advisories" → "Report a vulnerability" tab on the
-   sherd repository, **or**
-2. Email the maintainers directly at `security@sherd.invalid` (PGP
-   key fingerprint published in the repository root as
-   `SECURITY-PGP.asc` if available).
+   sherd repository. This is the preferred channel — it is private,
+   tracked, and does not depend on email deliverability.
 
 Please include the following in your report, where applicable:
 
@@ -63,8 +61,8 @@ sherd does **not** defend against:
 
 ## Hardening checklist for production deployment
 
-- Build with `cargo build --release` (the release profile enables LTO,
-  panic=abort, and strips symbols).
+- Build with `cargo build --release` (the release profile enables fat
+  LTO, overflow checks, and strips symbols).
 - Grant the binary `CAP_IPC_LOCK`:
   `sudo setcap cap_ipc_lock=ep ./sherd`.
 - Run on a system with `RLIMIT_MEMLOCK` raised to unlimited (see

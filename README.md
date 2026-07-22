@@ -1,21 +1,21 @@
 <p align="center">
-  <img src="branding/logo.png" alt="sherd" width="180" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="branding/logo-dark.png">
+    <img src="branding/logo.png" alt="sherd logo" width="140" />
+  </picture>
 </p>
 
-<h3 align="center">sherd</h3>
+<h1 align="center">sherd</h1>
 <p align="center">
-  Offline, single-binary encryption for people who actually need it to stay secret.
+  <b>Offline, single-binary encryption for adversarial conditions.</b>
 </p>
 
 <p align="center">
   <a href="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/xbxbxb462-cpu/sherd/releases"><img alt="Releases" src="https://img.shields.io/github/v/release/xbxbxb462-cpu/sherd?display_name=tag&sort=semver"></a>
-  <img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg">
-  <img alt="Rust" src="https://img.shields.io/badge/rust-1.74%2B-orange.svg">
+  <a href="https://github.com/xbxbxb462-cpu/sherd/releases"><img alt="Release" src="https://img.shields.io/github/v/release/xbxbxb462-cpu/sherd?display_name=tag&sort=semver"></a>
+  <a href="LICENSE-MIT"><img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg"></a>
   <img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.74-orange.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey.svg">
-  <img alt="LOC" src="https://img.shields.io/badge/lines-~7k-informational.svg">
-  <img alt="Status" src="https://img.shields.io/badge/status-beta-yellow.svg">
 </p>
 
 ---
@@ -121,6 +121,27 @@ sherd decrypt -I alice.key -i for-alice.shrd.asc
 ```
 
 ## Install
+
+### Prebuilt binaries (recommended)
+
+Download the archive for your platform from the
+[latest release](https://github.com/xbxbxb462-cpu/sherd/releases/latest),
+verify its checksum against the published `SHA256SUMS`, then install:
+
+```sh
+# example: Linux x86_64
+curl -LO https://github.com/xbxbxb462-cpu/sherd/releases/latest/download/sherd-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/xbxbxb462-cpu/sherd/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf sherd-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 755 sherd-x86_64-unknown-linux-gnu /usr/local/bin/sherd
+```
+
+Or with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+
+```sh
+cargo binstall sherd
+```
 
 ### From source
 
@@ -351,7 +372,7 @@ sherd completion powershell | Out-String | Invoke-Expression
 
 ### What sherd does not defend against
 
-- **A compromized OS or hardware implant.** If the kernel is hostile,
+- **A compromised OS or hardware implant.** If the kernel is hostile,
   `mlockall` is a suggestion. Use an air-gapped machine running Tails
   for high-stakes operations.
 - **Cold boot attacks.** Reboot cold before and after sensitive
@@ -429,7 +450,7 @@ ASCII armor wraps either format as:
 
 If the OS can swap your passphrase or master key to disk, it can be
 recovered later by anyone with physical access. `mlockall` prevents
-that. If you cannot grant `CAP_IPC_LOCK` or aise `RLIMIT_MEMLOCK`,
+that. If you cannot grant `CAP_IPC_LOCK` or raise `RLIMIT_MEMLOCK`,
 sherd refuses to run in release mode.
 
 **Why is there no config file?**
@@ -455,4 +476,39 @@ passphrase.
 **What happens if I lose my identity file?**
 
 The file key is wrapped to your X25519 public key. Without the private
-key, it cannot be recovered. There is no escrow, no recovery,�
+key, it cannot be recovered. There is no escrow, no recovery, no back door. Split the identity file with `sherd share-split` and distribute the shares if you need a recovery path.
+
+**Has sherd been audited?**
+
+Not yet. The design follows well-studied constructions (AES-256-GCM,
+Argon2id per RFC 9106, HKDF per RFC 5869) implemented via the audited
+RustCrypto crates, and every claim in the security model is covered by
+`sherd selftest` known-answer tests. An independent third-party audit
+is on the roadmap; until then, treat sherd as well-designed but
+unaudited software and act accordingly for life-critical use.
+
+## Contributing
+
+Contributions are welcome. Please read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request,
+and note the rules that keep sherd small and auditable:
+
+- No new dependencies without prior discussion in an issue.
+- No configuration files, no network code, no telemetry — ever.
+- Every security-relevant change must extend `sherd selftest`.
+- `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` must pass.
+
+Security issues must **not** be reported in public issues — see
+[`SECURITY.md`](SECURITY.md) for the private disclosure process.
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any
+contribution intentionally submitted for inclusion in sherd by you,
+as defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
