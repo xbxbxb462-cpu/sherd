@@ -48,3 +48,14 @@ jobs:
         run: |
           ./target/release/sherd --version
           ./target/release/sherd completion bash > /dev/null
+  msrv:
+    name: msrv (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with MSRV
+        run: cargo build --release
+      - name: Run tests with MSRV
+        run: cargo test --bin sherd
