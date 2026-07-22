@@ -203,9 +203,9 @@ The payload layout:
 
 | Offset | Length | Field |
 |-------:|-------:|-------|
-| 0 | 4 | secret_len (u32 BE) |
-| 4 | secret_len | secret |
-| 4 + secret_len | 4096 - 4 - secret_len - 32 | zero padding |
+| 0 | 2 | secret_len (u16 BE) |
+| 2 | secret_len | secret |
+| 2 + secret_len | 4096 - 2 - secret_len - 32 | zero padding |
 | 4096 - 32 | 32 | SHA-256(payload[0..4096-32]) |
 
 The SHA-256 digest detects tampering even when exactly K shares are
@@ -241,7 +241,7 @@ branchless (bitmask-based). Share indices x are drawn uniformly from
 | X25519_PUB_LEN | 32 |
 | WRAPPED_KEY_LEN | 48 (32 + 16) |
 | MAX_RECIPIENTS | 255 |
-| SHARE_FORMAT_VERSION | 1 |
+| SHARE_FORMAT_VERSION | 2 |
 | SHARE_PAYLOAD_LEN | 4096 |
 | SHARE_LEN | 4098 |
 
