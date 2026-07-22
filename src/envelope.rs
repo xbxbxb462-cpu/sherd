@@ -458,6 +458,7 @@ pub fn decrypt_stream(
             Err(_) => {
                 // Pad with zeros to match the success path's output size.
                 let pt_len = chunk_ct.len() - TAG_LEN;
+                #[allow(clippy::manual_repeat_n)]
                 out.extend(std::iter::repeat(0u8).take(pt_len));
                 all_ok = false;
             }
