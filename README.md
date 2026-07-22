@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/logo.png" alt="Sherd" width="180" />
+  <img src="branding/logo.png" alt="Sherd" width="400" />
 </p>
 
 <h3 align="center">Sherd</h3>
