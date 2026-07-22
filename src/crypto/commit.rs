@@ -18,38 +18,14 @@ use zeroize::Zeroizing;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Domain-separation prefix for the commit tag HMAC.
-///
-/// This prevents the commit tag from being confused with any other HMAC
-/// usage in the codebase (HKDF-Extract, HKDF-Expand both use HMAC-SHA256
-/// internally with different keys, but explicit domain separation is
-/// defense in depth).
 const COMMIT_TAG_DOMAIN_SEP: &[u8] = b"SHERD-v1-commit-tag\x00";
 
 /// Compute the 16-byte commitment tag.
 ///
-/// Inputs:
-///   - `commit_key`: the per-slot commit key derived via HKDF-Expand
-///   - `fixed_header`: the 16-byte fixed header (magic + version + flags + ...)
-///   - `salt`: the per-slot 32-byte salt
-///   - `base_iv`: the per-slot 12-byte base IV
-///   - `chunk_count`: number of chunks in the ciphertext
-///   - `ct_total_len`: total ciphertext length (sum of all chunk ct lengths)
-///   - `ct_first_chunk_hash`: SHA-256 hash of the first chunk's ciphertext
-///     (32 bytes). For empty ciphertexts, pass a zero-filled array.
-///
-/// The tag now covers `ct_first_chunk_hash`, a SHA-256 hash of the first
-/// chunk's ciphertext. This binds the tag to actual ciphertext content
-/// (not just metadata), preventing the "invisible salamander" attack
-/// where an attacker swaps ciphertexts between two files with the same
-/// metadata. We hash only the first chunk (not all chunks) for
-/// performance — the first chunk is the most position-sensitive
-/// (chunk_index=0 has the file's metadata prefix), and any tampering
-/// with later chunks will be caught by the AES-GCM tag verification
-/// during decrypt_stream.
-///
-/// The full 32-byte HMAC output is held in a `Zeroizing` wrapper so the
-/// second 16 bytes (which are computed but discarded) are wiped from the
-/// stack before return.
+/// Binds the commit_key to the fixed_header, salt, base_iv, chunk_count,
+/// ct_total_len, and a SHA-256 of the first chunk's ciphertext. The
+/// first-chunk hash prevents ciphertext-swap attacks between files with
+/// identical metadata. Later chunks are authenticated by their AEAD tags.
 pub(crate) fn compute_commit_tag(
     commit_key: &[u8],
     fixed_header: &[u8; FIXED_HEADER_LEN],
@@ -104,7 +80,7 @@ pub(crate) fn compute_commit_tag(
     full_bytes.as_mut_slice().zeroize();
     let mut tag = [0u8; COMMIT_TAG_LEN];
     tag.copy_from_slice(&full[..COMMIT_TAG_LEN]);
-    // `full` is Zeroizing<[u8; 32]> — wiped on drop (both halves of the
+    // `full` is Zeroizing<[u8; 32]> - wiped on drop (both halves of the
     // HMAC output). `full_bytes` was explicitly zeroized above.
     Ok(tag)
 }
@@ -117,24 +93,15 @@ pub(crate) fn compute_commit_tag(
 /// OR the GCM tag is detected by the commit tag verification.
 ///
 /// The hash is an UNKEYED SHA-256 with a domain-separation prefix. It
-/// does not use the commit_key — the security comes from the commit_tag
+/// does not use the commit_key - the security comes from the commit_tag
 /// HMAC binding the hash into the authenticated data.
 pub(crate) fn compute_first_chunk_hash(first_chunk_ct: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"SHERD-v1-first-chunk-hash\x00");
     hasher.update(first_chunk_ct);
-    // The `sha2` 0.10 crate does not expose a `zeroize` feature, so the
-    // internal Sha256 state (8 × u32 working state + 64-byte block buffer
-    // + counter) is NOT wiped when the hasher drops. The state contains
-    // intermediate hash values derived from the (attacker-controlled)
-    // ciphertext, not from any secret — so the leak is a defense-in-depth
-    // gap, not a direct secret compromise. We use `finalize_reset()`
-    // instead of `finalize()` to reset the internal state to the SHA-256
-    // IV (public constant) after producing the digest, reducing the
-    // residual leak from "intermediate hash state" to "the IV". This is
-    // not a substitute for true zeroization, but it is a meaningful
-    // improvement over dropping the hasher with full intermediate state
-    // intact.
+    // sha2 0.10 has no zeroize feature. finalize_reset() clears the
+    // internal state to the SHA-256 IV after producing the digest.
+    // The state only held attacker-controlled ciphertext, not secrets.
     let mut out = [0u8; 32];
     out.copy_from_slice(&hasher.finalize_reset());
     out

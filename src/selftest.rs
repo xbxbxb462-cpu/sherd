@@ -13,7 +13,7 @@ use crate::shamir;
 use anyhow::{bail, Result};
 use std::io::{self, Read, Write};
 
-/// NIST GCM TC1 empty-plaintext tag.
+/// AES-256-GCM TC13: empty plaintext, zero key/IV.
 const KAT_AESGCM_EMPTY_TAG_HEX: &str = "530f8afbc74536b9a963b4f1c4cb738b";
 
 /// Argon2id KAT: 1 MiB, 3 iters, 1 lane.
@@ -23,8 +23,7 @@ const KAT_ARGON2ID_HEX: &str = "71c7e08979b7a21e58ba5fcd9f2700b8fe45992540023533
 const KAT_HKDF_RFC5869_TC1_HEX: &str =
     "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865";
 
-/// HKDF PRK intermediate, RFC 5869 TC1. Pinning the PRK catches compensating
-/// bugs in extract/expand that still produce the right OKM.
+/// HKDF PRK intermediate, RFC 5869 TC1. Pins extract independently of expand.
 const KAT_HKDF_RFC5869_TC1_PRK_HEX: &str =
     "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5";
 
@@ -32,7 +31,7 @@ const KAT_HKDF_RFC5869_TC1_PRK_HEX: &str =
 const KAT_HMAC_RFC4231_TC1_HEX: &str =
     "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
 
-/// NIST GCM TC14: ciphertext+tag for 16-byte zero plaintext.
+/// AES-256-GCM TC14: 16-byte zero plaintext, zero key/IV.
 const KAT_AESGCM_16BYTE_CT_HEX: &str =
     "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919";
 
@@ -735,8 +734,7 @@ pub fn run_all_selftests() -> Result<()> {
             crate::crypto::constants::KdfPreset::Standard,
             false,
         )?;
-        let dec =
-            envelope::decrypt_envelope(&env, SecretBytes::from_slice(b"exact-1-chunk-pass"))?;
+        let dec = envelope::decrypt_envelope(&env, SecretBytes::from_slice(b"exact-1-chunk-pass"))?;
         if dec.as_slice() != pt.as_slice() {
             bail!("round-trip mismatch");
         }
@@ -1068,8 +1066,8 @@ pub fn run_all_selftests() -> Result<()> {
         }
     });
 
-    // Outputs must not be padded to a multiple of 8192. Allow at most 1
-    // coincidence out of 8 samples; otherwise the length oracle is back.
+    // Outputs must not be padded to a multiple of 8192. Allow at most
+    // 1 coincidence out of 8 samples; otherwise plaintext length leaks.
     test!("padding randomizes length", {
         const LENGTH_ORACLE_BLOCK: usize = 8192;
         let sizes: &[usize] = &[1, 100, 1000, 4096, 8192, 10000, 20000, 50000];
@@ -1078,7 +1076,7 @@ pub fn run_all_selftests() -> Result<()> {
             let pt = vec![b'L'; size];
             let env = envelope::encrypt_envelope(
                 &pt,
-                SecretBytes::from_slice(b"length-oracle-t6.1-pass"),
+                SecretBytes::from_slice(b"length-oracle-test-pass"),
                 None,
                 None,
                 crate::crypto::constants::KdfPreset::Standard,
@@ -1132,13 +1130,13 @@ pub fn run_all_selftests() -> Result<()> {
 
     // Both slots must share ct_total_len. Encrypt small real + large decoy.
     test!("decoy size matches real slot", {
-        let real_pt = b"small-real-msg-t6.3";
+        let real_pt = b"small-real-msg-test";
         let decoy_pt = vec![b'D'; 50_000];
         let env = envelope::encrypt_envelope(
             real_pt,
-            SecretBytes::from_slice(b"real-pass-t6.3-aaa"),
+            SecretBytes::from_slice(b"real-pass-test-aaa"),
             Some(&decoy_pt[..]),
-            Some(SecretBytes::from_slice(b"decoy-pass-t6.3-aaa")),
+            Some(SecretBytes::from_slice(b"decoy-pass-test-aaa")),
             crate::crypto::constants::KdfPreset::Standard,
             false,
         )?;
@@ -1160,7 +1158,7 @@ pub fn run_all_selftests() -> Result<()> {
         let pt = b"recursive-encryption-test-message";
         let env1 = envelope::encrypt_envelope(
             pt,
-            SecretBytes::from_slice(b"first-pass-t6.4-aaa"),
+            SecretBytes::from_slice(b"first-pass-test-aaa"),
             None,
             None,
             crate::crypto::constants::KdfPreset::Standard,
@@ -1171,7 +1169,7 @@ pub fn run_all_selftests() -> Result<()> {
         }
         match envelope::encrypt_envelope(
             &env1,
-            SecretBytes::from_slice(b"second-pass-t6.4-aaa"),
+            SecretBytes::from_slice(b"second-pass-test-aaa"),
             None,
             None,
             crate::crypto::constants::KdfPreset::Standard,
@@ -1201,7 +1199,7 @@ pub fn run_all_selftests() -> Result<()> {
         let big = vec![b'T'; CHUNK_SIZE * 2 + CHUNK_SIZE / 2]; // ~3 chunks
         let env = envelope::encrypt_envelope(
             &big,
-            SecretBytes::from_slice(b"timing-correct-pass-t6.6"),
+            SecretBytes::from_slice(b"timing-correct-pass-test"),
             None,
             None,
             crate::crypto::constants::KdfPreset::Standard,
@@ -1212,7 +1210,7 @@ pub fn run_all_selftests() -> Result<()> {
         let (_rest_after_s0, slot0) = envelope::Slot::parse(rest)?;
         let params = crate::crypto::constants::KdfPreset::Standard.params();
         let (prk_correct, _commit_key) = kdf::derive_slot_secrets_from_secret(
-            SecretBytes::from_slice(b"timing-correct-pass-t6.6"),
+            SecretBytes::from_slice(b"timing-correct-pass-test"),
             &slot0.salt,
             params.mem_kib,
             params.iters,
@@ -1268,7 +1266,8 @@ pub fn run_all_selftests() -> Result<()> {
         if wrong_median * 3 < correct_median {
             bail!(
                 "wrong-PRK decrypt {} ns is >3x faster than correct {} ns, timing leak",
-                wrong_median, correct_median
+                wrong_median,
+                correct_median
             );
         }
         Ok(())
@@ -1278,7 +1277,7 @@ pub fn run_all_selftests() -> Result<()> {
     test!("aead tag tamper rejected", {
         let key = [0u8; 32];
         let iv = [0u8; IV_LEN];
-        let pt = b"tag-tamper-test-message-t6.7";
+        let pt = b"tag-tamper-test-message";
         let mut ct = aead::encrypt_chunk(&key, &iv, b"aad", pt)?;
         let ct_len = ct.len();
         if ct_len < TAG_LEN {
@@ -1294,7 +1293,7 @@ pub fn run_all_selftests() -> Result<()> {
 
     // x=0 is the polynomial's constant term, i.e. the secret.
     test!("shamir rejects x=0", {
-        let secret = b"shamir-index-zero-test-t6.8";
+        let secret = b"shamir-index-zero-test";
         let shares = shamir::split(secret, 3, 5)?;
         let mut bad_share = shares[0].clone();
         bad_share[1] = 0;
@@ -1316,11 +1315,7 @@ pub fn run_all_selftests() -> Result<()> {
             let k_minus_1_shares: Vec<Vec<u8>> = shares[..(k - 1) as usize].to_vec();
             if let Ok(recovered) = shamir::combine(&k_minus_1_shares, k) {
                 if recovered.as_slice() == secret {
-                    bail!(
-                        "k-1={} shares recovered the SECRET for k={}",
-                        k - 1,
-                        k
-                    );
+                    bail!("k-1={} shares recovered the SECRET for k={}", k - 1, k);
                 }
                 bail!(
                     "combine accepted k-1={} shares for k={} (returned wrong value)",

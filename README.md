@@ -65,7 +65,7 @@ cargo install --path .
 sudo setcap cap_ipc_lock=ep "$(which sherd)"
 
 # encrypt a message to a passphrase (stdin → stdout)
-echo "top secret" | sherd encrypt --armor > msg.shrd.asc
+echo "top secret" | sherd encrypt > msg.shrd.asc
 
 # decrypt
 sherd decrypt -i msg.shrd.asc
@@ -77,7 +77,7 @@ For recipient-based encryption (no passphrase, just public keys):
 sherd keygen -o alice.key        # writes SHERD-SECRET-KEY-1... (mode 0600)
 sherd keygen -y -i alice.key     # prints: sherd1...
 
-echo "for alice" | sherd encrypt -r sherd1... --armor > for-alice.shrd.asc
+echo "for alice" | sherd encrypt -r sherd1... > for-alice.shrd.asc
 sherd decrypt -I alice.key -i for-alice.shrd.asc
 ```
 
@@ -133,7 +133,7 @@ commit tag verified before any plaintext is released.
 
 ```sh
 # stdin → stdout, ASCII-armored
-echo "top secret" | sherd encrypt --kdf standard --armor > msg.shrd.asc
+echo "top secret" | sherd encrypt --kdf standard > msg.shrd.asc
 
 # file → file, binary
 sherd encrypt-file -i report.pdf
@@ -184,13 +184,13 @@ sherd keygen -o alice.key
 sherd keygen -y -i alice.key
 
 # encrypt to one recipient
-echo "for alice" | sherd encrypt -r sherd1HVDKgCR... --armor > for-alice.shrd.asc
+echo "for alice" | sherd encrypt -r sherd1HVDKgCR... > for-alice.shrd.asc
 
 # encrypt to multiple recipients (everyone can decrypt)
 echo "for both" | sherd encrypt \
   -r sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo= \
   -r sherd1XqjsrbgszkY/XZ3LJku/PH1ZjyrqANYDQs05sP4aZG8= \
-  --armor > for-both.shrd.asc
+  > for-both.shrd.asc
 
 # encrypt to recipients listed in a file (one per line, # comments OK)
 echo "for the team" | sherd encrypt -R recipients.txt > team.shrd

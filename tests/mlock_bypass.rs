@@ -10,13 +10,12 @@
 //! This is the only way to verify the main.rs startup path: unit tests
 //! cannot exercise `main()`.
 
-use std::process::Command;
 use std::env;
+use std::process::Command;
 
 fn sherd_binary() -> String {
     // cargo sets CARGO_BIN_EXE_sherd for integration tests.
-    env::var("CARGO_BIN_EXE_sherd")
-        .expect("CARGO_BIN_EXE_sherd not set — run via `cargo test`")
+    env::var("CARGO_BIN_EXE_sherd").expect("CARGO_BIN_EXE_sherd not set — run via `cargo test`")
 }
 
 #[test]

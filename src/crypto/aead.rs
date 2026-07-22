@@ -1,23 +1,21 @@
 //! AES-256-GCM AEAD over the `aes-gcm` crate. Per-chunk keys come from
-//! `kdf::derive_chunk_key`. Per-chunk nonce is `base_iv` with the last 4
+//! `kdf::derive_chunk_key`. Per-chunk nonce is `base_iv` with the low 4
 //! bytes XORed by `chunk_index`; `base_iv` is fresh per slot. Outputs are
 //! `Zeroizing`; tag is verified before any plaintext leaves.
 
 use crate::crypto::constants::*;
+use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, Payload};
 use aes_gcm::Aes256Gcm;
-use aes_gcm::aead::generic_array::GenericArray;
 use anyhow::{bail, Result};
 use zeroize::Zeroizing;
 
 /// Per-chunk 96-bit nonce: `base_iv` XOR `chunk_index` in the low 4 bytes.
+/// The XOR is a bijection over u32, so distinct chunk indices yield distinct
+/// nonces regardless of `MAX_CHUNKS`. The debug assert is a protocol guard;
+/// callers must validate `chunk_count` upstream.
 pub(crate) fn chunk_nonce(base_iv: &[u8; IV_LEN], chunk_index: u32) -> [u8; IV_LEN] {
-    assert!(
-        chunk_index < MAX_CHUNKS,
-        "chunk_index {} exceeds MAX_CHUNKS {}",
-        chunk_index,
-        MAX_CHUNKS
-    );
+    debug_assert!(chunk_index < MAX_CHUNKS, "chunk_index out of range");
     let mut n = *base_iv;
     let idx_bytes = chunk_index.to_be_bytes();
     n[8] ^= idx_bytes[0];
@@ -27,15 +25,14 @@ pub(crate) fn chunk_nonce(base_iv: &[u8; IV_LEN], chunk_index: u32) -> [u8; IV_L
     n
 }
 
-/// Encrypt one chunk. Returns `ct || tag` in `Zeroizing`. `aad` is bound
-/// as associated data.
+/// Encrypt one chunk. Returns `ct || tag` in `Zeroizing`. `aad` is bound as
+/// associated data.
 pub(crate) fn encrypt_chunk(
     key: &[u8; 32],
     iv: &[u8; IV_LEN],
     aad: &[u8],
     pt: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    // Zero key means HKDF broke. Uniform error.
     if is_zero_key(key) {
         bail!("bad");
     }
@@ -44,12 +41,11 @@ pub(crate) fn encrypt_chunk(
     let ct = cipher
         .encrypt(nonce, Payload { msg: pt, aad })
         .map_err(|_| anyhow::anyhow!("bad"))?;
-    drop(cipher);
     Ok(Zeroizing::new(ct))
 }
 
-/// Decrypt one chunk. Tag verified via `subtle::ConstantTimeEq` before
-/// `Ok`. Buffer is `Zeroizing` so failed-decrypt garbage is wiped on drop.
+/// Decrypt one chunk. Tag verified before `Ok`. Buffer is `Zeroizing` so
+/// failed-decrypt garbage is wiped on drop.
 pub(crate) fn decrypt_chunk(
     key: &[u8; 32],
     iv: &[u8; IV_LEN],
@@ -71,23 +67,11 @@ pub(crate) fn decrypt_chunk(
     cipher
         .decrypt_in_place_detached(nonce, aad, pt_buf.as_mut_slice(), tag)
         .map_err(|_| anyhow::anyhow!("bad"))?;
-    drop(cipher);
     Ok(pt_buf)
 }
 
-/// Encrypt empty plaintext and return the 16-byte GCM tag.
-#[allow(dead_code)]
-pub(crate) fn encrypt_empty(key: &[u8; 32], iv: &[u8; IV_LEN]) -> Result<[u8; TAG_LEN]> {
-    let ct = encrypt_chunk(key, iv, &[], &[])?;
-    if ct.len() != TAG_LEN {
-        bail!("bad");
-    }
-    let mut tag = [0u8; TAG_LEN];
-    tag.copy_from_slice(&ct);
-    Ok(tag)
-}
-
-/// True if all 32 bytes are zero.
+/// True if all 32 bytes are zero. Constant-time: accumulates OR without
+/// short-circuit.
 fn is_zero_key(key: &[u8; 32]) -> bool {
     let mut acc: u8 = 0;
     for b in key.iter() {

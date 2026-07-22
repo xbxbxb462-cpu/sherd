@@ -122,7 +122,6 @@ pub const HKDF_INFO_CHUNK_PREFIX: &[u8] = b"sherd-v1/chunk/";
 pub const ARMOR_MSG: &str = "SHERD MESSAGE";
 #[allow(dead_code)]
 pub const ARMOR_FILE: &str = "SHERD FILE";
-/// ASCII armor label for Shamir share files.
 pub const ARMOR_SHARE: &str = "SHERD SHARE";
 
 // ---------------------------------------------------------------------------
@@ -132,10 +131,11 @@ pub const ARMOR_SHARE: &str = "SHERD SHARE";
 pub const MIN_PASS: usize = 12;
 
 // ---------------------------------------------------------------------------
-// Recipient-based envelope (v2): X25519 file-key wrapping.
+// Recipient-based envelope v2: X25519 file-key wrapping.
 // ---------------------------------------------------------------------------
 
-/// Envelope version 2: recipient-based (no Argon2id, X25519 file-key wrapping).
+/// Envelope version 2 for recipient-based encryption. Drops Argon2id in favor
+/// of X25519 file-key wrapping.
 #[allow(dead_code)]
 pub const VERSION_RECIPIENT: u8 = 2;
 
@@ -155,7 +155,7 @@ pub const WRAPPED_KEY_LEN: usize = FILE_KEY_LEN + TAG_LEN; // 32 + 16 = 48
 #[allow(dead_code)]
 pub const MAX_RECIPIENTS: usize = 255;
 
-/// Identity file format prefixes (like age's AGE-SECRET-KEY-1).
+/// Identity file format prefix.
 #[allow(dead_code)]
 pub const IDENTITY_PREFIX: &str = "SHERD-SECRET-KEY-1";
 #[allow(dead_code)]

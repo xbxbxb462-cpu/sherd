@@ -5,8 +5,8 @@
 //! envelope, so timing leaks structure of caller-controlled input, not
 //! plaintext.
 
-use anyhow::{bail, Result};
 use crate::crypto::constants::{ARMOR_FILE, ARMOR_MSG, ARMOR_SHARE};
+use anyhow::{bail, Result};
 
 /// Max armored input size. Caps OOM exposure from a huge blob piped to
 /// stdin. 512 MiB covers MAX_CT plus base64 overhead.
@@ -108,10 +108,7 @@ fn parse_armor_structure(text: &str) -> Result<(String, String)> {
         bail!("bad");
     }
     // Label must be a known Sherd label.
-    if !matches!(
-        begin_label.as_str(),
-        ARMOR_MSG | ARMOR_FILE | ARMOR_SHARE
-    ) {
+    if !matches!(begin_label.as_str(), ARMOR_MSG | ARMOR_FILE | ARMOR_SHARE) {
         bail!("bad");
     }
 

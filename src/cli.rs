@@ -196,8 +196,7 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
 
     // Branch: recipient mode (v2) if any -r/-R flag is given, else v1
     // passphrase mode.
-    let recipient_mode =
-        !args.recipient.is_empty() || args.recipients_file.is_some();
+    let recipient_mode = !args.recipient.is_empty() || args.recipients_file.is_some();
     if recipient_mode {
         return cmd_encrypt_message_recipients(&args, &plaintext);
     }
@@ -285,12 +284,9 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
 }
 
 /// Recipient-based (v2) encrypt path. Called by `cmd_encrypt_message`
-/// when `-r`/`-R` is supplied. No passphrase, no Argon2id — the file
+/// when `-r`/`-R` is supplied. No passphrase, no Argon2id - the file
 /// key is wrapped per recipient via X25519.
-fn cmd_encrypt_message_recipients(
-    args: &EncryptArgs,
-    plaintext: &[u8],
-) -> Result<()> {
+fn cmd_encrypt_message_recipients(args: &EncryptArgs, plaintext: &[u8]) -> Result<()> {
     // Decoy/paranoid/KDF flags are v1-only; reject them to avoid silent
     // misuse. The operator asked for recipient mode; pretending to honor
     // a decoy would be dangerous.
@@ -388,9 +384,9 @@ pub fn cmd_decrypt_message(args: DecryptArgs) -> Result<()> {
         eprintln!("[sherd] Decrypting recipient envelope (X25519)…");
         let pt = match envelope::decrypt_envelope_recipients(env.as_slice(), &identities) {
             Ok(pt) => pt,
-            Err(_) => bail!(
-                "decryption failed: no matching identity or corrupted/tampered message"
-            ),
+            Err(_) => {
+                bail!("decryption failed: no matching identity or corrupted/tampered message")
+            }
         };
         drop(env);
         write_output(&args.output, &pt)?;
@@ -899,7 +895,7 @@ pub struct KeygenArgs {
     pub input: Option<PathBuf>,
 }
 
-/// `sherd keygen` — generate a new X25519 identity, or print the public
+/// `sherd keygen` - generate a new X25519 identity, or print the public
 /// key of an existing one.
 pub fn cmd_keygen(args: KeygenArgs) -> Result<()> {
     if args.public {
@@ -927,7 +923,7 @@ pub fn cmd_keygen(args: KeygenArgs) -> Result<()> {
     let id = keygen::Identity::generate();
     let pubkey = id.to_recipient_string();
     let content = format!(
-        "# sherd identity file — keep secret\n# public key: {}\n{}\n",
+        "# sherd identity file - keep secret\n# public key: {}\n{}\n",
         pubkey,
         id.to_identity_string()
     );
@@ -986,19 +982,25 @@ pub fn cmd_inspect(input: &std::path::Path) -> Result<()> {
 /// per-slot metadata without touching ciphertext or running the KDF.
 fn inspect_envelope(env: &[u8], armored_size: usize) -> Result<()> {
     if env.len() < FIXED_HEADER_LEN {
-        bail!("envelope too short ({} bytes, need >= {})", env.len(), FIXED_HEADER_LEN);
+        bail!(
+            "envelope too short ({} bytes, need >= {})",
+            env.len(),
+            FIXED_HEADER_LEN
+        );
     }
     let version = env[4];
     println!("Format: sherd v{}", version);
 
     match version {
         1 => {
-            let (hdr, _fh) = envelope::FixedHeader::parse(env)
-                .map_err(|_| anyhow!("malformed fixed header"))?;
+            let (hdr, _fh) =
+                envelope::FixedHeader::parse(env).map_err(|_| anyhow!("malformed fixed header"))?;
             println!("Mode: passphrase");
             println!("Cipher: AES-256-GCM");
-            println!("KDF: Argon2id (mem={} KiB, iters={}, par={})",
-                hdr.kdf_mem_kib, hdr.kdf_iters, hdr.kdf_par);
+            println!(
+                "KDF: Argon2id (mem={} KiB, iters={}, par={})",
+                hdr.kdf_mem_kib, hdr.kdf_iters, hdr.kdf_par
+            );
             println!("Commit: HMAC-SHA256-trunc-128");
             println!("Flags: 0x{:02x}", hdr.flags);
             println!("  decoy:    {}", (hdr.flags & FLAG_DECOY) != 0);
@@ -1012,10 +1014,12 @@ fn inspect_envelope(env: &[u8], armored_size: usize) -> Result<()> {
             let mut rest = &env[FIXED_HEADER_LEN..];
             let mut total_ct: u64 = 0;
             for i in 0..hdr.slot_count {
-                let (remaining, slot) = envelope::Slot::parse(rest)
-                    .map_err(|_| anyhow!("malformed slot {}", i))?;
-                println!("  Slot {}: chunks={}, ciphertext={} bytes",
-                    i, slot.chunk_count, slot.ct_total_len);
+                let (remaining, slot) =
+                    envelope::Slot::parse(rest).map_err(|_| anyhow!("malformed slot {}", i))?;
+                println!(
+                    "  Slot {}: chunks={}, ciphertext={} bytes",
+                    i, slot.chunk_count, slot.ct_total_len
+                );
                 total_ct += slot.ct_total_len as u64;
                 rest = remaining;
             }
@@ -1234,17 +1238,9 @@ fn get_passphrase(
         return read_passphrase_from_file(path);
     }
 
-    // SHERD_PASS environment variable. std::env::var and remove_var
-    // mutate a shared global environment, so Rust marks them unsafe.
-    // main() is single-threaded here, so the unsafe is sound. If Sherd
-    // ever becomes multi-threaded, move this to a single-threaded init
-    // phase.
-    //
-    // /proc/PID/environ on Linux is a snapshot taken at execve time.
-    // remove_var updates the in-memory environ but not /proc/PID/environ,
-    // so the var stays visible to same-UID processes for the process
-    // lifetime. Prefer --pass-fd or interactive prompt; the env var is
-    // a CI/testing convenience.
+    // SHERD_PASS env var: CI/testing convenience. On Linux it stays
+    // visible in /proc/PID/environ for the process lifetime. Prefer
+    // --pass-fd or interactive prompt.
     if let Ok(p) = std::env::var("SHERD_PASS") {
         eprintln!("[sherd] WARNING: SHERD_PASS env var is visible in /proc/PID/environ");
         eprintln!("[sherd]          to ALL processes with the same UID for the process lifetime.");

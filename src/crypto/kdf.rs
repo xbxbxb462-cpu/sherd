@@ -50,17 +50,12 @@ pub(crate) fn argon2id_master(
     Ok(out)
 }
 
-/// HKDF-Extract: PRK = HMAC-SHA256(salt, IKM). Returns 32 bytes in
-/// `SecretBytes`.
+/// HKDF-Extract: PRK = HMAC-SHA256(salt, IKM). Returns 32 bytes in `SecretBytes`.
 pub(crate) fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Result<SecretBytes> {
     // extract returns (PRK, ()) for SHA-256; no error path.
     let (mut prk, _unit) = Hkdf::<Sha256>::extract(Some(salt), ikm);
-    // Wipe the on-stack PRK before returning.
     let prk_len = prk.as_slice().len();
-    debug_assert_eq!(
-        prk_len, 32,
-        "HKDF-Extract output length mismatch (expected 32 bytes for SHA-256)"
-    );
+    debug_assert_eq!(prk_len, 32, "HKDF-Extract PRK must be 32 bytes for SHA-256");
     if prk_len != 32 {
         prk.as_mut_slice().zeroize();
         bail!("bad");
@@ -86,9 +81,7 @@ pub(crate) fn hkdf_expand(prk: &[u8], info: &[u8], length: usize) -> Result<Secr
     let mut out: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(vec![0u8; length]);
     hk.expand(info, &mut out)
         .map_err(|_| anyhow::anyhow!("bad"))?;
-    let result = SecretBytes::from_slice(&out);
-    out.iter_mut().for_each(|b| *b = 0);
-    Ok(result)
+    Ok(SecretBytes::from_slice(&out))
 }
 
 /// Per-chunk AEAD key via HKDF-Expand. `info` binds `chunk_index` and
@@ -126,10 +119,10 @@ pub(crate) fn derive_commit_key(prk: &[u8]) -> Result<SecretBytes> {
 
 /// Slot secret tree:
 ///   passphrase -> Argon2id -> master -> HKDF-Extract(salt, master) -> PRK
-///   PRK -> HKDF-Expand("commit") -> commitKey
+///   PRK -> HKDF-Expand("commit") -> commit_key
 ///
-/// Passphrase is wiped right after Argon2id. Master key is wiped after
-/// HKDF-Extract. Only PRK and commitKey return, both in `SecretBytes`.
+/// Passphrase is wiped after Argon2id and master after HKDF-Extract. Only
+/// PRK and commit_key return, both in `SecretBytes`.
 pub(crate) fn derive_slot_secrets_from_secret(
     mut passphrase: crate::memory::SecretBytes,
     salt: &[u8; SALT_LEN],

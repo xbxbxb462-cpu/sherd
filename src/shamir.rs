@@ -1,6 +1,6 @@
-//! Shamir Secret Sharing over GF(256), branchless and constant-time.
+//! Shamir Secret Sharing over GF(256), constant-time.
 //!
-//! Share format (v2): `[VERSION(1) | x(1) | secret_len(2 BE) | secret(L)
+//! Share format: `[VERSION(1) | x(1) | secret_len(2 BE) | secret(L)
 //! | zero_pad(P) | sha256(...)(32)]`. The digest covers everything
 //! except itself. K and N are not stored; K is supplied to `combine()`.
 
@@ -97,12 +97,12 @@ fn ct_eq_u8(a: &[u8], b: &[u8]) -> u8 {
 
 /// Split `secret` into `n` shares, any `k` of which reconstruct it.
 ///
-/// Each share is `[SHARE_FORMAT_VERSION, x]` + `SHARE_PAYLOAD_BYTES` of
-/// Shamir-protected payload (secret + 2-byte length + zero padding +
-/// SHA-256 digest).
+/// Each share is `[SHARE_FORMAT_VERSION, x]` followed by
+/// `SHARE_PAYLOAD_BYTES` of payload: 2-byte length, secret, zero padding,
+/// SHA-256 digest.
 ///
-/// Constraints: `secret.len() <= MAX_SECRET_LEN` (4062), `2 <= k <= n <= 10`.
-/// Returns a uniform `Err("bad")` on any invalid input; no oracle.
+/// Requires `secret.len() <= MAX_SECRET_LEN` and `2 <= k <= n <= 10`.
+/// Returns `Err("bad")` on any invalid input; no oracle.
 pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
     if !(2..=10).contains(&k) || !(k..=10).contains(&n) {
         bail!("bad");
@@ -124,8 +124,8 @@ pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
     let digest = hasher.finalize_reset();
     payload[HASH_OFFSET..SHARE_PAYLOAD_BYTES].copy_from_slice(&digest);
 
-    // Generate n distinct random x in [1, 255]. x=0 leaks the constant
-    // term, so it is rejected. Batched RNG to cut syscall count.
+    // Generate n distinct random x in [1, 255]. x=0 is the constant
+    // term and would leak the secret byte. Batched RNG to cut syscalls.
     let mut xs: Vec<u8> = Vec::with_capacity(n as usize);
     let mut seen = [false; 256];
     let mut rng_batch = [0u8; 32];
@@ -166,7 +166,7 @@ pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
     for &sb in payload.iter() {
         coeffs[0] = sb;
         // Reject all-zero random coeffs: a constant polynomial would
-        // let any single share reveal that byte. Constant-time OR-accumulation.
+        // let any single share reveal that byte.
         let mut att = 0u32;
         loop {
             rng::fill(&mut coeffs[1..]);
@@ -182,13 +182,11 @@ pub fn split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>> {
                 bail!("bad");
             }
         }
-        // Evaluate at each x via Hörner form.
+        // Hörner form: y = c_{k-1}; y = y*x ^ c_{k-2}; ... ; y = y*x ^ c_0.
         for (idx, &x) in xs.iter().enumerate() {
             let mut y = 0u8;
-            let mut xp = 1u8; // x^0
-            for &c in coeffs.iter() {
-                y ^= gmul(c, xp);
-                xp = gmul(xp, x);
+            for &c in coeffs.iter().rev() {
+                y = gmul(y, x) ^ c;
             }
             shares[idx].push(y);
         }

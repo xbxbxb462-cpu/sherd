@@ -203,7 +203,9 @@ fn main() -> Result<()> {
                         eprintln!("[sherd]     *  hard  memlock  unlimited");
                         eprintln!("[sherd]   then log out and back in; or re-run as root.");
                         #[cfg(debug_assertions)]
-                        eprintln!("[sherd]   DEBUG BUILD: set SHERD_ALLOW_NO_MLOCK=1 to accept the risk.");
+                        eprintln!(
+                            "[sherd]   DEBUG BUILD: set SHERD_ALLOW_NO_MLOCK=1 to accept the risk."
+                        );
                         #[cfg(not(debug_assertions))]
                         eprintln!(
                             "[sherd]   This is a RELEASE build; the SHERD_ALLOW_NO_MLOCK \
