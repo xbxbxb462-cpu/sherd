@@ -1,119 +1,214 @@
-# Sherd
+<p align="center">
+  <img src="branding/logo.png" alt="Sherd" width="180" />
+</p>
 
-A paranoid-grade, single-binary offline encryption tool. Sherd encrypts
-messages and files with **AES-256-GCM** using a key derived from your
-passphrase via **Argon2id** and **HKDF-SHA256**. It supports
-**plausible deniability** through an indistinguishable decoy slot,
-**Shamir Secret Sharing** over GF(256), a **paranoid mode** that
-adds randomized padding to obscure plaintext length, and
-**recipient-based (X25519) encryption** modeled on age. All secret
-buffers — including plaintext — are zeroized on drop, the entire
-process address space is locked against swap via `mlockall`, and core
-dumps are disabled.
+<h3 align="center">Sherd</h3>
+<p align="center">
+  Offline, single-binary encryption for people who actually need it to stay secret.
+</p>
 
-> Sherd targets Unix platforms (Linux, macOS, BSD). Windows is not
-> supported; use WSL2 if you must run on Windows.
+<p align="center">
+  <a href="https://github.com/xbxbxb462-cpu/sherd/actions"><img alt="CI" src="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.74%2B-orange.svg">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey.svg">
+  <img alt="Status" src="https://img.shields.io/badge/status-beta-yellow.svg">
+</p>
 
-## Features
+---
 
-- **Symmetric encryption** — AES-256-GCM per-chunk streaming AEAD with
-  cryptographically independent per-chunk keys derived via HKDF-Expand.
-- **Recipient-based encryption (v2)** — encrypt to one or more X25519
-  public keys (`sherd1…`) instead of a passphrase. Each recipient gets
-  an independent stanza wrapping a random file key; any single
-  recipient's identity (`sherd keygen`) decrypts. No Argon2id, so
-  encrypt/decrypt are instant.
-- **Argon2id KDF** — three presets (`standard`, `paranoid`, `extreme`)
-  with RFC 9106 §4 first-recommendation minimums enforced.
-- **Key commitment** — HMAC-SHA256-truncated-128 verified before AEAD
-  decryption to fail fast on a wrong passphrase without revealing which
-  step failed.
-- **Plausible deniability** — every file has two indistinguishable
-  slots; supply a decoy passphrase to reveal a decoy plaintext under
-  coercion. Sizes are randomized so an observer cannot tell which slot
-  is "real".
-- **Paranoid mode** — adds 1–4 blocks of randomized padding (on top of
-  a non-block-aligned base) so the ciphertext size does not leak the
-  plaintext length within a 4 KiB window.
-- **Shamir Secret Sharing** — split a secret into N shares, any K of
-  which reconstruct it. Shares are a fixed 4098 bytes regardless of
-  secret length; threshold K and total N are not stored in any share,
-  so an interceptor of a single share learns nothing about the
-  quorum.
-- **Uniform-timing decryption** — every chunk of every slot is
-  processed regardless of whether the commit tag matched, closing the
-  timing side-channel that would otherwise break plausible
-  deniability.
-- **Memory hygiene** — every secret buffer (passphrase, master key,
-  PRK, commit key, per-chunk keys, padded plaintext, decrypted
-  output, Shamir-reconstructed secret, X25519 identity, file key) is
-  wrapped in `Zeroizing<…>` and wiped on drop. `mlockall(MCL_CURRENT |
-  MCL_FUTURE)` locks the whole process against swap.
-  `prctl(PR_SET_DUMPABLE, 0)` and `setrlimit(RLIMIT_CORE, 0)` disable
-  core dumps.
-- **Self-tests** — `sherd selftest` runs known-answer tests
-  (Argon2id, HKDF-SHA256, HMAC-SHA256, AES-256-GCM) and round-trip /
-  tamper-rejection tests before you trust the binary in a sensitive
-  environment.
+Sherd is a command-line encryption tool built around one assumption: the
+adversary is competent. It encrypts messages and files with
+**AES-256-GCM** using keys derived through **Argon2id** and
+**HKDF-SHA256**, or with **X25519 recipient keys** for asymmetric
+exchange. It supports **plausible deniability** via an indistinguishable
+decoy slot, **Shamir Secret Sharing** over GF(256), and a **paranoid
+mode** that obscures plaintext length.
+
+Every secret buffer is wrapped in `Zeroizing<…>` and wiped on drop.
+The whole process address space is locked against swap with
+`mlockall(MCL_CURRENT | MCL_FUTURE)`. Core dumps are disabled. Decryption
+runs in uniform time across slots and chunks. There is no configuration
+file, no network, no telemetry, no plugin loader.
+
+> **Platform support.** Linux, macOS, BSD. Not Windows. On Windows use
+> WSL2 — the security model depends on `mlockall`, `termios`, and Unix
+> file permissions, none of which have trustworthy Win32 equivalents.
+
+---
+
+## Table of contents
+
+- [Quickstart](#quickstart)
+- [Install](#install)
+- [Usage](#usage)
+  - [Passphrase encryption](#passphrase-encryption)
+  - [Recipient encryption (X25519)](#recipient-encryption-x25519)
+  - [Plausible deniability](#plausible-deniability)
+  - [Shamir secret sharing](#shamir-secret-sharing)
+  - [Inspect without decrypting](#inspect-without-decrypting)
+- [Security model](#security-model)
+- [File format](#file-format)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Quickstart
+
+```sh
+# from source (requires Rust 1.74+)
+git clone https://github.com/xbxbxb462-cpu/sherd.git
+cd sherd
+cargo install --path .
+
+# allow memory locking without root
+sudo setcap cap_ipc_lock=ep "$(which sherd)"
+
+# encrypt a message to a passphrase (stdin → stdout)
+echo "top secret" | sherd encrypt --armor > msg.shrd.asc
+
+# decrypt
+sherd decrypt -i msg.shrd.asc
+```
+
+For recipient-based encryption (no passphrase, just public keys):
+
+```sh
+sherd keygen -o alice.key        # writes SHERD-SECRET-KEY-1... (mode 0600)
+sherd keygen -y -i alice.key     # prints: sherd1...
+
+echo "for alice" | sherd encrypt -r sherd1... --armor > for-alice.shrd.asc
+sherd decrypt -I alice.key -i for-alice.shrd.asc
+```
 
 ## Install
 
-From source (requires Rust 1.74+):
+### From source
+
+Requires Rust 1.74 or newer.
 
 ```sh
-git clone https://github.com/sherd/sherd.git
+git clone https://github.com/xbxbxb462-cpu/sherd.git
 cd sherd
 cargo install --path .
 ```
 
-The binary is installed as `sherd` in your Cargo bin directory
-(usually `~/.cargo/bin`).
+The binary lands in `~/.cargo/bin/sherd`.
 
-For production use, grant the binary `CAP_IPC_LOCK` so it can lock
-memory against swap without running as root:
+### Memory locking
+
+Sherd refuses to run in release mode unless it can lock its address
+space against swap. Pick one:
 
 ```sh
-sudo setcap cap_ipc_lock=ep $(which sherd)
+# option A: grant the capability once
+sudo setcap cap_ipc_lock=ep "$(which sherd)"
+
+# option B: raise the memlock rlimit for all users
+echo '*  soft  memlock  unlimited' | sudo tee -a /etc/security/limits.conf
+echo '*  hard  memlock  unlimited' | sudo tee -a /etc/security/limits.conf
+# log out and back in
 ```
 
-Alternatively, raise the `memlock` rlimit in
-`/etc/security/limits.conf`:
+In debug builds, `SHERD_ALLOW_NO_MLOCK=1` is honored with a loud warning.
+In release builds the variable is rejected.
 
-```
-*  soft  memlock  unlimited
-*  hard  memlock  unlimited
+### Verify the binary
+
+```sh
+sherd hash       # prints the SHA-256 of the running binary
+sherd selftest   # runs Argon2id / HKDF / HMAC / AES-GCM known-answer tests
 ```
 
 ## Usage
 
-### Encrypt a message (stdin → stdout, ASCII-armored)
+Sherd has nine subcommands. Run `sherd --help` for the full list, or
+`sherd <command> --help` for details.
+
+### Passphrase encryption
+
+Encrypt to a passphrase. The passphrase is stretched through Argon2id
+(memory 64–256 MiB, iterations 3–5, parallelism 4) and bound into a
+commit tag verified before any plaintext is released.
 
 ```sh
-echo "top secret" | sherd encrypt --kdf standard > message.shrd.asc
-```
+# stdin → stdout, ASCII-armored
+echo "top secret" | sherd encrypt --kdf standard --armor > msg.shrd.asc
 
-You will be prompted for a passphrase (minimum 12 characters).
-
-### Decrypt a message
-
-```sh
-sherd decrypt -i message.shrd.asc -o plaintext.txt
-```
-
-### Encrypt a file (binary envelope, `.shrd` extension)
-
-```sh
+# file → file, binary
 sherd encrypt-file -i report.pdf
-# → report.pdf.shrd
+# writes report.pdf.shrd (mode 0600)
 ```
 
-### Decrypt a file
+Decrypt:
 
 ```sh
+sherd decrypt -i msg.shrd.asc
 sherd decrypt-file -i report.pdf.shrd -o report.pdf
 ```
 
-### Encrypt with a decoy (plausible deniability)
+KDF presets:
+
+| preset | memory | iterations | lanes | use case |
+|--------|-------:|-----------:|------:|----------|
+| `standard` | 64 MiB | 3 | 4 | default, interactive |
+| `paranoid` | 128 MiB | 4 | 4 | sensitive, adds length-jitter padding |
+| `extreme` | 256 MiB | 5 | 4 | offline master keys |
+
+Passphrase sources (in order of safety):
+
+```sh
+# file descriptor (never appears in /proc/PID/cmdline)
+sherd encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.shrd
+
+# file path (path appears in cmdline, passphrase does not)
+sherd encrypt --pass-file passfile -i plain.txt -o cipher.shrd
+
+# env var (CI convenience; visible in /proc/PID/environ on Linux)
+SHERD_PASS=... sherd encrypt -i plain.txt -o cipher.shrd
+```
+
+### Recipient encryption (X25519)
+
+Encrypt to one or more X25519 public keys. No passphrase, no Argon2id,
+instant encrypt and decrypt. The file key is random per file; each
+recipient gets an independent stanza wrapping that key with an ephemeral
+X25519 + HKDF-SHA256 + AES-256-GCM.
+
+```sh
+# generate an identity (private key + public key comment)
+sherd keygen -o alice.key
+# Public key: sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo=
+
+# print only the public key from an existing identity
+sherd keygen -y -i alice.key
+
+# encrypt to one recipient
+echo "for alice" | sherd encrypt -r sherd1HVDKgCR... --armor > for-alice.shrd.asc
+
+# encrypt to multiple recipients (everyone can decrypt)
+echo "for both" | sherd encrypt \
+  -r sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo= \
+  -r sherd1XqjsrbgszkY/XZ3LJku/PH1ZjyrqANYDQs05sP4aZG8= \
+  --armor > for-both.shrd.asc
+
+# encrypt to recipients listed in a file (one per line, # comments OK)
+echo "for the team" | sherd encrypt -R recipients.txt > team.shrd
+
+# decrypt with any matching identity
+sherd decrypt -I alice.key -i for-both.shrd.asc
+```
+
+Identity files contain one or more `SHERD-SECRET-KEY-1...` lines, one
+per line. `#` lines are comments. You can pass `-I` multiple times to
+try several identities.
+
+### Plausible deniability
+
+Every passphrase-encrypted file has two indistinguishable slots. If you
+supply a decoy passphrase and decoy plaintext, the second slot carries
+the decoy; under coercion you reveal the decoy passphrase and the
+adversary cannot prove a second slot exists.
 
 ```sh
 sherd encrypt \
@@ -123,150 +218,215 @@ sherd encrypt \
   -i real.txt -o real.shrd.asc
 ```
 
-Under coercion, reveal `decoy-pass.txt` to "decrypt" `decoy.txt`. The
-two slots are indistinguishable from ciphertext alone.
+Both slots are padded to the same randomized target length, so the file
+size does not reveal which slot is larger.
 
-### Recipient-based encryption (X25519, age-style)
+### Shamir secret sharing
 
-Generate an identity for each recipient. The identity file is secret;
-the public key (printed to stderr and embedded as a `# public key:`
-comment in the file) is what you share.
-
-```sh
-# Generate Alice's identity (written to alice.key with mode 0600).
-sherd keygen -o alice.key
-# → Public key: sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo=
-
-# Print only the public key from an existing identity.
-sherd keygen -y -i alice.key
-# → sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo=
-```
-
-Encrypt to one or more recipients with `-r` (repeatable) or
-`-R recipients.txt` (one `sherd1…` per line, `#` comments allowed).
-No passphrase is prompted.
+Split a secret into N shares, any K of which reconstruct it. Shares are
+a fixed 4098 bytes regardless of secret length. The threshold K and
+total N are **not** stored in any share — an interceptor of one share
+learns nothing about the quorum.
 
 ```sh
-echo "for alice and bob" | sherd encrypt \
-  -r sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo= \
-  -r sherd1XqjsrbgszkY/XZ3LJku/PH1ZjyrqANYDQs05sP4aZG8= \
-  -o recipients.shrd.asc
-```
-
-Decrypt with `-I identity.key` (repeatable to try multiple
-identities). The CLI auto-detects v2 recipient envelopes from the
-magic+version byte.
-
-```sh
-sherd decrypt -i recipients.shrd.asc -I alice.key -o alice.out
-# or
-sherd decrypt -i recipients.shrd.asc -I bob.key -o bob.out
-```
-
-Inspect either format without decrypting — `sherd inspect` reports
-the version, mode (passphrase vs recipient), cipher, KDF params (v1)
-or recipient count (v2), and per-slot / per-stanza metadata.
-
-```sh
-sherd inspect -i recipients.shrd.asc
-```
-
-### Comparison with age
-
-Sherd's v2 recipient mode is inspired by [age](https://age-encryption.org)
-and uses the same X25519 + HKDF-SHA256 + AEAD pattern for file-key
-wrapping. Differences:
-
-| Aspect | age | Sherd v2 |
-|---|---|---|
-| Recipient stanza | X25519 + HKDF + ChaCha20-Poly1305 | X25519 + HKDF-SHA256 + AES-256-GCM |
-| Payload AEAD | ChaCha20-Poly1305 (single key) | AES-256-GCM with per-chunk HKDF-derived keys |
-| Chunking | 64 KiB | 1 MiB (cap 256 MiB) |
-| Padding | Random 0–65535 bytes via age_pad | Randomized length prefix + 32 B min pad + 0–8 KiB jitter + 1–4 × 4 KiB blocks |
-| Identity format | `AGE-SECRET-KEY-1…` | `SHERD-SECRET-KEY-1…` |
-| Recipient format | `age1…` (bech32) | `sherd1…` (base64) |
-| Passphrase mode | scrypt | Argon2id + HMAC commit + decoy slot (plausible deniability) |
-| Decoy / deniability | No | Yes (v1) |
-| Shamir secret sharing | No | Yes |
-| Memory hygiene | Best-effort | `mlockall` + per-buffer mlock + zeroize-on-drop + core-dump disabled |
-
-Use Sherd v2 when you want age-style recipient encryption with the
-option to fall back to Argon2id + plausible deniability for the same
-payload, plus Shamir sharing and stronger memory hygiene. Use age when
-you want a widely-deployed, audited, single-purpose tool.
-
-### Split a secret with Shamir (3-of-5)
-
-```sh
+# 3-of-5 split
 sherd share-split -i master.key -k 3 -n 5 > shares.txt
-```
 
-Distribute each `=== SHERD Share ===` block to a separate holder
-over a separate channel.
+# distribute each === SHERD Share === block over a separate channel
 
-### Reconstruct a secret
-
-```sh
+# reconstruct with any 3
 sherd share-combine -k 3 -s share1.txt -s share2.txt -s share3.txt -o master.key
 ```
 
-The threshold `-k` is supplied by the caller; it is **not** stored in
-any share.
+The threshold `-k` is supplied by the caller at combine time. It is not
+recovered from the shares.
 
-### Passphrase sources
+### Inspect without decrypting
 
-For non-interactive use, prefer file descriptors (never appear in
-`/proc/PID/cmdline`):
-
-```sh
-sherd encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.shrd
-```
-
-`--pass-file <path>` is also supported (the path appears in cmdline,
-but the passphrase does not). The `SHERD_PASS` environment variable
-is supported as a CI/testing convenience **with a loud warning**: on
-Linux it remains visible in `/proc/PID/environ` for the entire
-process lifetime.
-
-### Verify the binary
+`sherd inspect` reports file metadata without running the KDF or
+touching ciphertext:
 
 ```sh
-sherd hash
-sherd selftest
+sherd inspect -i file.shrd
 ```
 
-`sherd hash` prints the SHA-256 of the running binary so you can
-verify it out-of-band. `sherd selftest` runs the cryptographic
-known-answer tests.
+Output includes: format version, mode (passphrase vs recipient), cipher,
+KDF params (v1) or recipient count (v2), chunk count, ciphertext size,
+per-slot / per-stanza sizes. Useful for triage before decryption.
 
-## Security notes
+## Security model
 
-- **Threat model.** Sherd defends against ciphertext-only attackers,
-  header tampering, commit-tag forgery, chunk compromise, nonce reuse,
-  timing oracles, coercion (via the decoy layer), and memory forensics.
-  It does **not** defend against a compromised OS or hardware
-  implant — for that, use an air-gapped machine running Tails OS.
-- **Memory locking is mandatory in release builds.** The
-  `SHERD_ALLOW_NO_MLOCK` environment variable is honored only in
-  debug builds (with a loud warning). In release builds, the variable
-  is rejected before `mlockall` runs.
-- **KDF minimums are enforced.** Argon2id parameters are bounded to
-  `[64 MiB, 256 MiB]` memory, `[3, 5]` iterations, and `4` parallelism
-  lanes. Files encrypted with weaker parameters are rejected at
-  decryption time.
-- **No recursive encryption.** Re-encrypting an already-encrypted
-  file is an operational footgun. `sherd encrypt` refuses input that
+### What Sherd defends against
+
+- **Ciphertext-only attackers.** AES-256-GCM with per-chunk HKDF-derived
+  keys; nonce reuse is structurally impossible (random `base_iv` per
+  slot, chunk index XOR'd into the nonce).
+- **Header tampering.** The fixed header is bound into the commit tag
+  (HMAC-SHA256-truncated-128) and into every chunk's AEAD AAD.
+- **Commit-tag forgery.** The commit tag also binds a SHA-256 of the
+  first chunk's ciphertext, preventing the "invisible salamander"
+  ciphertext-swap attack.
+- **Chunk compromise.** Each chunk has its own HKDF-derived key; a
+  broken chunk does not reveal neighboring chunks.
+- **Timing oracles.** Every chunk of every slot is processed regardless
+  of whether the commit tag matched. Wrong passphrases take the same
+  wall-clock time as correct ones (modulo Argon2id variance).
+- **Length oracles.** Output size is randomized: 4-byte length prefix
+  (authenticated) + minimum 32-byte pad + uniform 0–8 KiB jitter +
+  paranoid mode adds 1–4 × 4 KiB blocks. Decoy slots are padded to the
+  same target length.
+- **Coercion.** The decoy slot is indistinguishable from the real slot.
+  Both are valid AES-256-GCM ciphertexts with valid commit tags.
+- **Memory forensics.** `mlockall(MCL_CURRENT | MCL_FUTURE)` locks the
+  whole address space. `prctl(PR_SET_DUMPABLE, 0)` and
+  `setrlimit(RLIMIT_CORE, 0)` disable core dumps. Every secret buffer
+  (passphrase, master key, PRK, commit key, per-chunk keys, padded
+  plaintext, decrypted output, Shamir-reconstructed secret, X25519
+  identity, file key) is wrapped in `Zeroizing<…>` and wiped on drop.
+- **Recursive-encryption footgun.** `sherd encrypt` refuses input that
   begins with the `SHR1` magic unless you pass `--force`.
-- **Constant-time operations.** Secret comparisons use
-  `subtle::ConstantTimeEq`. GF(256) arithmetic (used by Shamir) is
-  branchless.
-- **Quantum adversaries.** AES-256 is Grover-resistant to 2^128.
-- **Out of scope.** Cold boot attacks (reboot cold before/after
-  sensitive operations), browser/OS 0-days, side channels beyond
-  timing.
+- **Path traversal.** Embedded filenames in `decrypt-file` are
+  sanitized; output paths are checked against the input path.
+- **File clobbering.** `decrypt-file` refuses to overwrite an existing
+  output file unless `--force` is given.
+- **TOCTOU on input.** Files are opened once, `fstat`'d on the fd, and
+  read from the same fd.
 
-If you find a security issue, see [`SECURITY.md`](SECURITY.md) for
-responsible disclosure.
+### What Sherd does not defend against
+
+- **A compromised OS or hardware implant.** If the kernel is hostile,
+  `mlockall` is a suggestion. Use an air-gapped machine running Tails
+  for high-stakes operations.
+- **Cold boot attacks.** Reboot cold before and after sensitive
+  operations if this threat is in scope.
+- **Browser or OS zero-days.** Out of scope.
+- **Side channels beyond timing.** Power, EM, acoustic — out of scope.
+
+### Quantum adversaries
+
+AES-256 is Grover-resistant to 2^128 work. X25519 is not (quantum
+adversary breaks ECDH). If quantum adversaries are in scope, use the
+passphrase mode with a high-entropy passphrase and `--kdf extreme`.
+
+For the full disclosure policy, see [`SECURITY.md`](SECURITY.md).
+
+## File format
+
+### v1 — passphrase
+
+```
++-------------------+
+| magic "SHR1"      |  4 bytes
+| version = 1       |  1 byte
+| flags             |  1 byte  (FLAG_PARANOID always set)
+| cipher_id         |  1 byte  (AES-256-GCM)
+| kdf_id            |  1 byte  (Argon2id)
+| commit_id         |  1 byte  (HMAC-SHA256-trunc-128)
+| kdf_mem_kib       |  4 bytes (u32 BE)
+| kdf_iters         |  1 byte  (u8)
+| kdf_par           |  1 byte  (u8)
+| slot_count        |  1 byte  (always 2)
++-------------------+
+| slot 0            |  salt[16] + iv[12] + commit_tag[16]
+|                   |  + chunk_count[4] + ct_total_len[4]
+|                   |  + ciphertext[ct_total_len]
++-------------------+
+| slot 1            |  (same layout; real or decoy)
++-------------------+
+```
+
+### v2 — recipient
+
+```
++-------------------+
+| magic "SHR1"      |  4 bytes
+| version = 2       |  1 byte
+| recipient_count   |  1 byte  (1..=255)
+| base_iv           |  12 bytes
+| chunk_count       |  4 bytes (u32 BE)
+| ct_total_len      |  4 bytes (u32 BE)
++-------------------+
+| stanza 0          |  ephemeral_pub[32] + wrapped_key[48]
+| ...               |
+| stanza N-1        |  ephemeral_pub[32] + wrapped_key[48]
++-------------------+
+| ciphertext        |  ct_total_len bytes
++-------------------+
+```
+
+Chunk size is 1 MiB; maximum ciphertext is 256 MiB (256 chunks). Each
+chunk has an independent AES-256-GCM key derived via
+`HKDF-Expand(file_key, "sherd-v1/chunk/{i}/{count}")`.
+
+ASCII armor wraps either format as:
+
+```
+-----BEGIN SHERD MESSAGE-----
+<base64, 64 chars per line>
+-----END SHERD MESSAGE-----
+```
+
+## FAQ
+
+**Why is memory locking mandatory?**
+
+If the OS can swap your passphrase or master key to disk, it can be
+recovered later by anyone with physical access. `mlockall` prevents
+that. If you cannot grant `CAP_IPC_LOCK` or raise `RLIMIT_MEMLOCK`,
+Sherd refuses to run in release mode.
+
+**Why is there no config file?**
+
+Configuration files are an attack surface. A hostile config could
+downgrade the KDF preset, disable padding, or change the cipher. Every
+security-relevant parameter is either hardcoded (cipher, KDF algorithm)
+or specified explicitly on the command line (KDF preset, decoy).
+
+**Why two slots in passphrase mode?**
+
+The second slot is the plausible-deniability channel. If you don't
+supply a decoy, the second slot is a structurally identical dummy with
+random ciphertext — an observer cannot tell whether a decoy exists.
+
+**Can I encrypt to both a passphrase and a recipient?**
+
+Not in one file. Use two files: one passphrase-encrypted, one
+recipient-encrypted, with the same plaintext. Or encrypt the plaintext
+to a recipient, then encrypt the recipient's identity file with a
+passphrase.
+
+**What happens if I lose my identity file?**
+
+The file key is wrapped to your X25519 public key. Without the private
+key, it cannot be recovered. There is no escrow, no recovery, no
+backdoor.
+
+**Is the format stable?**
+
+The v1 and v2 formats are stable as of sherd 1.0. Future versions will
+add new version bytes, not break existing ones. The ASCII armor labels
+(`SHERD MESSAGE`, `SHERD FILE`, `SHERD SHARE`) are fixed.
+
+**Why not ChaCha20-Poly1305?**
+
+AES-256-GCM has hardware acceleration on x86_64 and ARM64, which makes
+constant-time implementation easier to verify. ChaCha20-Poly1305 is a
+fine cipher; this is a preference, not a security claim.
+
+## Contributing
+
+Pull requests are welcome. Before submitting:
+
+```sh
+cargo fmt
+cargo clippy --release -- -D warnings
+cargo test
+```
+
+The CI workflow runs the same checks on every push and pull request.
+
+If you find a security issue, **do not open a public issue**. See
+[`SECURITY.md`](SECURITY.md) for the private disclosure process.
 
 ## License
 
@@ -275,9 +435,4 @@ Dual-licensed under either of
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
-at your option.
-
-## Contributing
-
-Pull requests are welcome. Please run `cargo fmt`, `cargo clippy`, and
-`cargo test` before submitting (the CI workflow does the same).
+at your option. Contribution under the same dual license.

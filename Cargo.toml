@@ -5,15 +5,12 @@ edition = "2021"
 rust-version = "1.74"
 authors = ["Sherd Project"]
 license = "MIT OR Apache-2.0"
-description = "Paranoid-grade symmetric encryption tool with plausible deniability and Shamir secret sharing"
-repository = "https://github.com/sherd/sherd"
+description = "Offline, single-binary encryption with plausible deniability, Shamir secret sharing, and X25519 recipient mode"
+repository = "https://github.com/xbxbxb462-cpu/sherd"
 keywords = ["crypto", "encryption", "aes-gcm", "argon2", "shamir"]
 categories = ["cryptography", "command-line-utilities"]
 publish = false
 
-# Prevent cargo-auditable from embedding the dependency tree (SBOM) into
-# the binary. The embedded JSON would list every crate name + version,
-# defeating the path/version stripping in .cargo/config.toml.
 [package.metadata]
 auditable = false
 
@@ -25,16 +22,7 @@ path = "src/main.rs"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-# Use `panic = "unwind"` (not "abort") so that Drop impls on
-# `Zeroizing`/`SecretBytes` buffers run during a panic, wiping secrets
-# from memory before the process exits. With `panic = "abort"` the Drop
-# impls are skipped, leaving passphrases and plaintext keys in RAM
-# until the OS reaps the process — defeating the mlock + zeroize
-# defense-in-depth. The custom panic hook (main.rs) sanitizes stderr.
 panic = "unwind"
-# Strip all symbols at link time. Combined with `debug = false` and the
-# `--remap-path-prefix` flags in `.cargo/config.toml`, this removes
-# developer-machine paths and cargo registry structure from the binary.
 strip = "symbols"
 debug = false
 debug-assertions = false
