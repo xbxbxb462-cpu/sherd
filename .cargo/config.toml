@@ -7,10 +7,10 @@
 # versions via the registry folder names (e.g. `argon2-0.5.3`).
 #
 # What IS removed:
-#   - /home/z/... prefix (developer home directory)
-#   - /home/z/.cargo/registry/src/index.crates.io-<hash>/ prefix
-#   - /home/z/.cargo prefix
-#   - /home/z/.rustup prefix
+#   - $HOME/... prefix (developer home directory)
+#   - $HOME/.cargo/registry/src/index.crates.io-<hash>/ prefix
+#   - $HOME/.cargo prefix
+#   - $HOME/.rustup prefix
 #   - the project's own absolute path
 #   - debug info (debuginfo=0)
 #   - linker symbols (link-args=-Wl,-s)
@@ -33,9 +33,12 @@
 #   # Expected: no output
 
 [build]
+# ⚠️ PATH REMAPPING: Replace $HOME with your actual home directory path below.
+#    These flags strip developer machine paths from release binaries.
+#    For CI, set these via RUSTFLAGS env var see .github/workflows/ci.yml.
 # Order matters: longest prefixes MUST come first. If a shorter prefix
-# (e.g. /home/z=.) is applied first, it consumes the path before the
-# longer, more specific remaps (e.g. /home/z/.cargo/registry/src/...) get
+# (e.g. $YOUR_HOME=.) is applied first, it consumes the path before the
+# longer, more specific remaps (e.g. $HOME/.cargo/registry/src/...) get
 # a chance to match.
 #
 # IMPORTANT: do NOT add a trailing slash to the `from` side. rustc treats
@@ -44,23 +47,23 @@
 # practice, leaving the original path in the binary.
 rustflags = [
     # 1. Hide the cargo registry src directory (longest, most specific).
-    #    After remapping: /home/z/.cargo/registry/src/index.crates.io-<hash>/<crate>-<ver>/...
+    #    After remapping: $HOME/.cargo/registry/src/index.crates.io-<hash>/<crate>-<ver>/...
     #    becomes: deps/io/<crate>-<ver>/...
-    "--remap-path-prefix=/home/z/.cargo/registry/src/index.crates.io-=deps/io",
+    "--remap-path-prefix=$HOME/.cargo/registry/src/index.crates.io-=deps/io",
     # 2. Hide the cargo registry src prefix (catches any other registry
     #    mirror hash). After remapping: deps/<rest>
-    "--remap-path-prefix=/home/z/.cargo/registry/src=deps",
+    "--remap-path-prefix=$HOME/.cargo/registry/src=deps",
     # 3. Hide the cargo registry root (catches the index, cache, git).
-    "--remap-path-prefix=/home/z/.cargo/registry=./cargo-registry",
+    "--remap-path-prefix=$HOME/.cargo/registry=./cargo-registry",
     # 4. Hide the cargo root (covers git checkouts, binary cache, etc.).
-    "--remap-path-prefix=/home/z/.cargo=./cargo",
+    "--remap-path-prefix=$HOME/.cargo=./cargo",
     # 5. Hide the rustup toolchain root (covers std library paths).
-    "--remap-path-prefix=/home/z/.rustup=./rustup",
+    "--remap-path-prefix=$HOME/.rustup=./rustup",
     # 6. Hide the project's absolute path.
-    "--remap-path-prefix=/home/z/my-project/sherd_project=./src",
+    "--remap-path-prefix=$YOUR_PROJECT_ROOT/=./src",
     # 7. Finally, hide the developer's home directory entirely (catch-all
     #    for anything not matched above).
-    "--remap-path-prefix=/home/z=.",
+    "--remap-path-prefix=$YOUR_HOME=.",
     # Strip debug info (no file:line in panic locations).
     "-C", "debuginfo=0",
     # Strip symbols at link time.
