@@ -16,7 +16,7 @@ Instead, report vulnerabilities privately:
 1. Open a new **GitHub Security Advisory** via the
    "Security" → "Advisories" → "Report a vulnerability" tab on the
    Sherd repository, **or**
-2. Email the maintainers directly at `xbxbxb462@gmail.com` (PGP
+2. Email the maintainers directly at `security@sherd.invalid` (PGP
    key fingerprint published in the repository root as
    `SECURITY-PGP.asc` if available).
 

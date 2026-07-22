@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="branding/logo.png" alt="Sherd" width="400" />
+  <img src="branding/logo.png" alt="Sherd" width="180" />
 </p>
 
 <h3 align="center">Sherd</h3>
@@ -8,10 +8,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/xbxbxb462-cpu/sherd/actions"><img alt="CI" src="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/xbxbxb462-cpu/sherd/releases"><img alt="Releases" src="https://img.shields.io/github/v/release/xbxbxb462-cpu/sherd?display_name=tag&sort=semver"></a>
   <img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.74%2B-orange.svg">
+  <img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.74-orange.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey.svg">
+  <img alt="LOC" src="https://img.shields.io/badge/lines-~7k-informational.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-beta-yellow.svg">
 </p>
 
@@ -32,8 +35,44 @@ runs in uniform time across slots and chunks. There is no configuration
 file, no network, no telemetry, no plugin loader.
 
 > **Platform support.** Linux, macOS, BSD. Not Windows. On Windows use
-> WSL2 — the security model depends on `mlockall`, `termios`, and Unix
+> WSL2 - the security model depends on `mlockall`, `termios`, and Unix
 > file permissions, none of which have trustworthy Win32 equivalents.
+
+---
+
+## Why Sherd?
+
+Most encryption tools optimize for convenience. Sherd optimizes for the
+case where the adversary is competent and motivated.
+
+- **Memory is locked, not just zeroized.** `mlockall(MCL_CURRENT |
+  MCL_FUTURE)` prevents the kernel from swapping any page of the process
+  to disk. Core dumps are disabled via `setrlimit(RLIMIT_CORE, 0)` and
+  `prctl(PR_SET_DUMPABLE, 0)`. A cold-reboot attacker finds nothing.
+- **Plausible deniability is real, not theatrical.** Every
+  passphrase-encrypted file has two indistinguishable slots. Under
+  coercion you reveal the decoy passphrase; the adversary cannot prove
+  a second slot exists. Both slots are valid AES-256-GCM ciphertexts
+  with valid commit tags, padded to the same randomized length.
+- **Decryption is uniform-timing.** Every chunk of every slot is
+  processed regardless of whether the commit tag matched. A wrong
+  passphrase takes the same wall-clock time as a correct one. This
+  closes the timing oracle that would otherwise break plausible
+  deniability.
+- **Shamir shares leak nothing.** Shares are a fixed 4098 bytes
+  regardless of secret length. The threshold K and total N are not
+  stored in any share. An interceptor of one share cannot learn the
+  quorum or the secret size.
+- **No configuration surface.** No config file, no plugin loader, no
+  network. A hostile environment variable cannot downgrade the KDF or
+  disable padding. Every security-relevant parameter is hardcoded or
+  specified explicitly on the command line.
+- **Recipient mode for asymmetric exchange.** Encrypt to X25519 public
+  keys (`sherd1...`). No passphrase, no Argon2id, instant encrypt and
+  decrypt. Each recipient gets an independent stanza; any single
+  recipient's identity decrypts.
+
+For the full protocol specification, see [`docs/protocol.md`](docs/protocol.md).
 
 ---
 
@@ -253,6 +292,24 @@ sherd inspect -i file.shrd
 Output includes: format version, mode (passphrase vs recipient), cipher,
 KDF params (v1) or recipient count (v2), chunk count, ciphertext size,
 per-slot / per-stanza sizes. Useful for triage before decryption.
+
+### Shell completion
+
+Generate completion scripts for bash, zsh, fish, or PowerShell:
+
+```sh
+# bash (add to ~/.bashrc)
+sherd completion bash > ~/.local/share/bash-completion/completions/sherd
+
+# zsh (add to ~/.zshrc)
+sherd completion zsh > "${fpath[1]}/_sherd"
+
+# fish
+sherd completion fish > ~/.config/fish/completions/sherd.fish
+
+# powershell
+sherd completion powershell | Out-String | Invoke-Expression
+```
 
 ## Security model
 

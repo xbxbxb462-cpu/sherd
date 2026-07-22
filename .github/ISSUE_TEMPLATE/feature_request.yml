@@ -1,0 +1,27 @@
+---
+name: Feature request
+about: Suggest a new feature or improvement
+title: "[feature] "
+labels: enhancement
+assignees: ''
+---
+
+## Summary
+
+One paragraph describing the feature.
+
+## Motivation
+
+What problem does this solve? Who benefits?
+
+## Proposal
+
+How should it work? CLI surface, file format changes, security implications.
+
+## Alternatives considered
+
+What other approaches did you consider and reject?
+
+## Additional context
+
+Links, references, prior art.

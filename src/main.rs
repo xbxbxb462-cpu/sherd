@@ -57,7 +57,20 @@ enum Command {
     Inspect(cli::InspectArgs),
     /// Generate a new X25519 identity, or print the public key of an existing one
     Keygen(cli::KeygenArgs),
+    /// Print shell completion script for bash, zsh, fish, or powershell
+    Completion {
+        /// Shell to generate completion for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
+
+const BANNER: &str = "\n\
+\x1b[1m\x1b[38;5;179m    _  _ ___ ___ ___ ___ _  _ _____\x1b[0m\n\
+\x1b[1m\x1b[38;5;179m   | || | __/ __| __| _ \\ || |_   _|\x1b[0m\n\
+\x1b[1m\x1b[38;5;179m   | __ | _|\\__ \\ _\\   / __ | | |\x1b[0m\n\
+\x1b[1m\x1b[38;5;179m   |_||_|___|___/___|_\\_\\_||_| |_|\x1b[0m\n\
+\x1b[2m   v1.0.0 - offline encryption\x1b[0m\n";
 
 /// Replace the default panic hook with one that prints a generic message.
 /// The default hook leaks source paths, line numbers, and backtraces to
@@ -113,6 +126,34 @@ fn main() -> Result<()> {
     // SHERD_ALLOW_NO_MLOCK: release builds refuse to start if the env var
     // is present at all; debug builds honor it with a warning so CI can
     // run without CAP_IPC_LOCK.
+    //
+    // Skip mlockall entirely for commands that never touch secrets:
+    // --help, --version, completion, hash. These run before any crypto
+    // and would otherwise refuse to start on systems without CAP_IPC_LOCK,
+    // which defeats their purpose (e.g. shell completion setup).
+    let is_safe_command = {
+        let args: Vec<String> = std::env::args().collect();
+        args.iter()
+            .any(|a| a == "--version" || a == "-V" || a == "--help" || a == "-h")
+            || args.windows(2).any(|w| w[0] == "completion")
+    };
+    if is_safe_command {
+        // Show banner before clap prints version/help.
+        if std::env::args().any(|a| a == "--version" || a == "-V") {
+            eprint!("{}", BANNER);
+        }
+        let cli = Cli::parse();
+        return match cli.command {
+            Command::Completion { shell } => {
+                use clap::CommandFactory;
+                let mut cmd = Cli::command();
+                clap_complete::generate(shell, &mut cmd, "sherd", &mut std::io::stdout());
+                Ok(())
+            }
+            _ => Ok(()),
+        };
+    }
+
     #[cfg(unix)]
     {
         #[cfg(not(debug_assertions))]
@@ -268,6 +309,7 @@ fn main() -> Result<()> {
         }
         Command::Inspect(args) => cli::cmd_inspect(&args.input),
         Command::Keygen(args) => cli::cmd_keygen(args),
+        Command::Completion { .. } => Ok(()), // handled before mlockall
     };
 
     // Handlers return Err on the decrypt-failure path so Drop impls wipe

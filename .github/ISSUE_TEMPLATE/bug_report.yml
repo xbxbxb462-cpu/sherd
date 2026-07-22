@@ -1,0 +1,40 @@
+---
+name: Bug report
+about: Report a bug or unexpected behavior
+title: "[bug] "
+labels: bug
+assignees: ''
+---
+
+## Describe the bug
+
+A clear description of what the bug is.
+
+## To reproduce
+
+Steps to trigger the behavior:
+1. Run `sherd ...`
+2. ...
+3. See error
+
+## Expected behavior
+
+What you expected to happen.
+
+## Environment
+
+- sherd version: `sherd --version`
+- OS: 
+- Architecture: 
+- How installed: [source / cargo / prebuilt binary]
+
+## Output
+
+```
+Paste the command output here. Remove any passphrases or sensitive data first.
+```
+
+## Additional context
+
+Anything else relevant. If this is a security issue, do NOT file a public
+bug. See SECURITY.md for private disclosure.
