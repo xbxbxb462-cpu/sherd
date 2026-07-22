@@ -130,3 +130,33 @@ pub const ARMOR_SHARE: &str = "SHERD SHARE";
 // ---------------------------------------------------------------------------
 
 pub const MIN_PASS: usize = 12;
+
+// ---------------------------------------------------------------------------
+// Recipient-based envelope (v2): X25519 file-key wrapping.
+// ---------------------------------------------------------------------------
+
+/// Envelope version 2: recipient-based (no Argon2id, X25519 file-key wrapping).
+#[allow(dead_code)]
+pub const VERSION_RECIPIENT: u8 = 2;
+
+/// HKDF info labels for recipient file-key wrapping.
+#[allow(dead_code)]
+pub const HKDF_INFO_WRAP_KEY: &[u8] = b"sherd-v1/wrap-key";
+#[allow(dead_code)]
+pub const HKDF_INFO_WRAP_NONCE: &[u8] = b"sherd-v1/wrap-nonce";
+
+/// Sizes for recipient stanzas.
+#[allow(dead_code)]
+pub const X25519_PUB_LEN: usize = 32;
+#[allow(dead_code)]
+pub const FILE_KEY_LEN: usize = 32;
+#[allow(dead_code)]
+pub const WRAPPED_KEY_LEN: usize = FILE_KEY_LEN + TAG_LEN; // 32 + 16 = 48
+#[allow(dead_code)]
+pub const MAX_RECIPIENTS: usize = 255;
+
+/// Identity file format prefixes (like age's AGE-SECRET-KEY-1).
+#[allow(dead_code)]
+pub const IDENTITY_PREFIX: &str = "SHERD-SECRET-KEY-1";
+#[allow(dead_code)]
+pub const RECIPIENT_PREFIX: &str = "sherd1";

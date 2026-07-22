@@ -1,32 +1,28 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/xbxbxb462-cpu/sherd/main/logo.png" alt="sherd" width="200">
-</p>
+# Sherd
 
-<p align="center">
-  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/language-Rust-orange" alt="Rust"></a>
-  <a href="SECURITY.md"><img src="https://img.shields.io/badge/security-policy-brightgreen" alt="Security"></a>
-</p>
-
-# sherd
-
-A paranoid-grade, single-binary offline encryption tool. sherd encrypts
+A paranoid-grade, single-binary offline encryption tool. Sherd encrypts
 messages and files with **AES-256-GCM** using a key derived from your
 passphrase via **Argon2id** and **HKDF-SHA256**. It supports
 **plausible deniability** through an indistinguishable decoy slot,
-**Shamir Secret Sharing** over GF(256), and a **paranoid mode** that
-adds randomized padding to obscure plaintext length. All secret
+**Shamir Secret Sharing** over GF(256), a **paranoid mode** that
+adds randomized padding to obscure plaintext length, and
+**recipient-based (X25519) encryption** modeled on age. All secret
 buffers — including plaintext — are zeroized on drop, the entire
 process address space is locked against swap via `mlockall`, and core
 dumps are disabled.
 
-> sherd targets Unix platforms (Linux, macOS, BSD). Windows is not
+> Sherd targets Unix platforms (Linux, macOS, BSD). Windows is not
 > supported; use WSL2 if you must run on Windows.
 
 ## Features
 
 - **Symmetric encryption** — AES-256-GCM per-chunk streaming AEAD with
   cryptographically independent per-chunk keys derived via HKDF-Expand.
+- **Recipient-based encryption (v2)** — encrypt to one or more X25519
+  public keys (`sherd1…`) instead of a passphrase. Each recipient gets
+  an independent stanza wrapping a random file key; any single
+  recipient's identity (`sherd keygen`) decrypts. No Argon2id, so
+  encrypt/decrypt are instant.
 - **Argon2id KDF** — three presets (`standard`, `paranoid`, `extreme`)
   with RFC 9106 §4 first-recommendation minimums enforced.
 - **Key commitment** — HMAC-SHA256-truncated-128 verified before AEAD
@@ -50,10 +46,11 @@ dumps are disabled.
   deniability.
 - **Memory hygiene** — every secret buffer (passphrase, master key,
   PRK, commit key, per-chunk keys, padded plaintext, decrypted
-  output, Shamir-reconstructed secret) is wrapped in `Zeroizing<…>`
-  and wiped on drop. `mlockall(MCL_CURRENT | MCL_FUTURE)` locks the
-  whole process against swap. `prctl(PR_SET_DUMPABLE, 0)` and
-  `setrlimit(RLIMIT_CORE, 0)` disable core dumps.
+  output, Shamir-reconstructed secret, X25519 identity, file key) is
+  wrapped in `Zeroizing<…>` and wiped on drop. `mlockall(MCL_CURRENT |
+  MCL_FUTURE)` locks the whole process against swap.
+  `prctl(PR_SET_DUMPABLE, 0)` and `setrlimit(RLIMIT_CORE, 0)` disable
+  core dumps.
 - **Self-tests** — `sherd selftest` runs known-answer tests
   (Argon2id, HKDF-SHA256, HMAC-SHA256, AES-256-GCM) and round-trip /
   tamper-rejection tests before you trust the binary in a sensitive
@@ -63,8 +60,8 @@ dumps are disabled.
 
 From source (requires Rust 1.74+):
 
-```shell
-git clone https://github.com/xbxbxb462-cpu/sherd.git
+```sh
+git clone https://github.com/sherd/sherd.git
 cd sherd
 cargo install --path .
 ```
@@ -75,7 +72,7 @@ The binary is installed as `sherd` in your Cargo bin directory
 For production use, grant the binary `CAP_IPC_LOCK` so it can lock
 memory against swap without running as root:
 
-```shell
+```sh
 sudo setcap cap_ipc_lock=ep $(which sherd)
 ```
 
@@ -91,7 +88,7 @@ Alternatively, raise the `memlock` rlimit in
 
 ### Encrypt a message (stdin → stdout, ASCII-armored)
 
-```shell
+```sh
 echo "top secret" | sherd encrypt --kdf standard > message.shrd.asc
 ```
 
@@ -99,26 +96,26 @@ You will be prompted for a passphrase (minimum 12 characters).
 
 ### Decrypt a message
 
-```shell
+```sh
 sherd decrypt -i message.shrd.asc -o plaintext.txt
 ```
 
 ### Encrypt a file (binary envelope, `.shrd` extension)
 
-```shell
+```sh
 sherd encrypt-file -i report.pdf
 # → report.pdf.shrd
 ```
 
 ### Decrypt a file
 
-```shell
+```sh
 sherd decrypt-file -i report.pdf.shrd -o report.pdf
 ```
 
 ### Encrypt with a decoy (plausible deniability)
 
-```shell
+```sh
 sherd encrypt \
   --decoy decoy.txt \
   --decoy-pass-file decoy-pass.txt \
@@ -129,9 +126,78 @@ sherd encrypt \
 Under coercion, reveal `decoy-pass.txt` to "decrypt" `decoy.txt`. The
 two slots are indistinguishable from ciphertext alone.
 
+### Recipient-based encryption (X25519, age-style)
+
+Generate an identity for each recipient. The identity file is secret;
+the public key (printed to stderr and embedded as a `# public key:`
+comment in the file) is what you share.
+
+```sh
+# Generate Alice's identity (written to alice.key with mode 0600).
+sherd keygen -o alice.key
+# → Public key: sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo=
+
+# Print only the public key from an existing identity.
+sherd keygen -y -i alice.key
+# → sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo=
+```
+
+Encrypt to one or more recipients with `-r` (repeatable) or
+`-R recipients.txt` (one `sherd1…` per line, `#` comments allowed).
+No passphrase is prompted.
+
+```sh
+echo "for alice and bob" | sherd encrypt \
+  -r sherd1HVDKgCR/RXkQCN1iVr7mejRHHMdg/0nOKzOlP37OtUo= \
+  -r sherd1XqjsrbgszkY/XZ3LJku/PH1ZjyrqANYDQs05sP4aZG8= \
+  -o recipients.shrd.asc
+```
+
+Decrypt with `-I identity.key` (repeatable to try multiple
+identities). The CLI auto-detects v2 recipient envelopes from the
+magic+version byte.
+
+```sh
+sherd decrypt -i recipients.shrd.asc -I alice.key -o alice.out
+# or
+sherd decrypt -i recipients.shrd.asc -I bob.key -o bob.out
+```
+
+Inspect either format without decrypting — `sherd inspect` reports
+the version, mode (passphrase vs recipient), cipher, KDF params (v1)
+or recipient count (v2), and per-slot / per-stanza metadata.
+
+```sh
+sherd inspect -i recipients.shrd.asc
+```
+
+### Comparison with age
+
+Sherd's v2 recipient mode is inspired by [age](https://age-encryption.org)
+and uses the same X25519 + HKDF-SHA256 + AEAD pattern for file-key
+wrapping. Differences:
+
+| Aspect | age | Sherd v2 |
+|---|---|---|
+| Recipient stanza | X25519 + HKDF + ChaCha20-Poly1305 | X25519 + HKDF-SHA256 + AES-256-GCM |
+| Payload AEAD | ChaCha20-Poly1305 (single key) | AES-256-GCM with per-chunk HKDF-derived keys |
+| Chunking | 64 KiB | 1 MiB (cap 256 MiB) |
+| Padding | Random 0–65535 bytes via age_pad | Randomized length prefix + 32 B min pad + 0–8 KiB jitter + 1–4 × 4 KiB blocks |
+| Identity format | `AGE-SECRET-KEY-1…` | `SHERD-SECRET-KEY-1…` |
+| Recipient format | `age1…` (bech32) | `sherd1…` (base64) |
+| Passphrase mode | scrypt | Argon2id + HMAC commit + decoy slot (plausible deniability) |
+| Decoy / deniability | No | Yes (v1) |
+| Shamir secret sharing | No | Yes |
+| Memory hygiene | Best-effort | `mlockall` + per-buffer mlock + zeroize-on-drop + core-dump disabled |
+
+Use Sherd v2 when you want age-style recipient encryption with the
+option to fall back to Argon2id + plausible deniability for the same
+payload, plus Shamir sharing and stronger memory hygiene. Use age when
+you want a widely-deployed, audited, single-purpose tool.
+
 ### Split a secret with Shamir (3-of-5)
 
-```shell
+```sh
 sherd share-split -i master.key -k 3 -n 5 > shares.txt
 ```
 
@@ -140,7 +206,7 @@ over a separate channel.
 
 ### Reconstruct a secret
 
-```shell
+```sh
 sherd share-combine -k 3 -s share1.txt -s share2.txt -s share3.txt -o master.key
 ```
 
@@ -152,7 +218,7 @@ any share.
 For non-interactive use, prefer file descriptors (never appear in
 `/proc/PID/cmdline`):
 
-```shell
+```sh
 sherd encrypt --pass-fd 3 3<passfile -i plain.txt -o cipher.shrd
 ```
 
@@ -164,7 +230,7 @@ process lifetime.
 
 ### Verify the binary
 
-```shell
+```sh
 sherd hash
 sherd selftest
 ```
@@ -175,7 +241,7 @@ known-answer tests.
 
 ## Security notes
 
-- **Threat model.** sherd defends against ciphertext-only attackers,
+- **Threat model.** Sherd defends against ciphertext-only attackers,
   header tampering, commit-tag forgery, chunk compromise, nonce reuse,
   timing oracles, coercion (via the decoy layer), and memory forensics.
   It does **not** defend against a compromised OS or hardware
@@ -190,7 +256,7 @@ known-answer tests.
   decryption time.
 - **No recursive encryption.** Re-encrypting an already-encrypted
   file is an operational footgun. `sherd encrypt` refuses input that
-  begins with the `SHRD` magic unless you pass `--force`.
+  begins with the `SHR1` magic unless you pass `--force`.
 - **Constant-time operations.** Secret comparisons use
   `subtle::ConstantTimeEq`. GF(256) arithmetic (used by Shamir) is
   branchless.

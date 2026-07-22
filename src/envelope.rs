@@ -9,10 +9,13 @@ use crate::crypto::aead;
 use crate::crypto::commit;
 use crate::crypto::constants::*;
 use crate::crypto::kdf;
+use crate::crypto::keygen;
+use crate::crypto::recipient;
 use crate::crypto::rng;
 use crate::memory::SecretBytes;
 use anyhow::{bail, Result};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
@@ -815,5 +818,315 @@ pub fn decrypt_envelope(envelope: &[u8], passphrase: SecretBytes) -> Result<Zero
     match result {
         Some(pt) => Ok(pt),
         None => bail!("bad"), // uniform error
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Envelope v2: recipient-based (X25519 file-key wrapping)
+// ---------------------------------------------------------------------------
+//
+// Wire layout:
+//   MAGIC (4) || version=2 (1) || recipient_count (1) || base_iv (12)
+//   || chunk_count (4 BE) || ct_total_len (4 BE)
+//   || [ stanza: ephemeral_pub (32) || wrapped_key (48) ] * recipient_count
+//   || ciphertext (ct_total_len)
+//
+// No Argon2id, no salt, no commit tag. The file_key (32 random bytes) is the
+// PRK for HKDF-Expand chunk-key derivation; per-recipient stanzas wrap it via
+// X25519 + HKDF + AES-256-GCM. AAD binds the 22-byte header
+// (magic+version+rcount+base_iv+chunk_count); the salt field in chunk_aad is
+// zero (placeholder for v2).
+
+/// V2 header length before the stanza block: 4+1+1+12+4+4 = 26 bytes.
+const V2_HEADER_LEN: usize = 26;
+/// V2 AAD header length (excludes ct_total_len, which is unknown at AAD time):
+/// 4+1+1+12+4 = 22 bytes.
+const V2_AAD_HEADER_LEN: usize = 22;
+/// Per-stanza on-wire size: ephemeral X25519 pub (32) + wrapped file_key (48).
+const V2_STANZA_LEN: usize = X25519_PUB_LEN + WRAPPED_KEY_LEN;
+
+/// Encrypt plaintext to one or more X25519 recipients. Returns the v2
+/// envelope bytes. No Argon2id, no passphrase — the file key is wrapped
+/// per-recipient.
+pub fn encrypt_envelope_recipients(
+    plaintext: &[u8],
+    recipients: &[[u8; X25519_PUB_LEN]],
+) -> Result<Vec<u8>> {
+    if recipients.is_empty() {
+        bail!("bad");
+    }
+    if recipients.len() > MAX_RECIPIENTS {
+        bail!("bad");
+    }
+    if plaintext.len() > MAX_CT {
+        bail!("bad");
+    }
+    // Refuse recursive encryption via the 4-byte magic check.
+    if is_sherd_envelope(plaintext) {
+        return Err(EnvelopeError::InputAlreadyEncrypted.into());
+    }
+
+    // 1. Random file_key — serves directly as the HKDF-Expand PRK.
+    let mut file_key = recipient::generate_file_key();
+
+    // 2. Wrap per recipient.
+    let stanzas: Vec<recipient::Stanza> = recipients
+        .iter()
+        .map(|r| recipient::wrap_file_key(&file_key, r))
+        .collect();
+
+    // 3. Pad (reuse the v1 randomized padding; paranoid flag is unused
+    //    inside pad_plaintext, only the target_len matters).
+    let target_len = padded_len_with_jitter(plaintext.len(), false);
+    let padded = pad_plaintext(plaintext, target_len, false)?;
+
+    // 4. Random base_iv.
+    let mut base_iv = [0u8; IV_LEN];
+    rng::fill(&mut base_iv);
+
+    // 5. Chunk count from padded length (matches what encrypt_stream will
+    //    compute internally).
+    let chunk_count = compute_chunk_count(padded.len());
+    if chunk_count > MAX_CHUNKS {
+        file_key.zeroize();
+        bail!("bad");
+    }
+
+    // 6. Build the 22-byte AAD header. ct_total_len is NOT included — it
+    //    is not known until after encryption.
+    let mut aad_hdr = Vec::with_capacity(V2_AAD_HEADER_LEN);
+    aad_hdr.extend_from_slice(&MAGIC);
+    aad_hdr.push(VERSION_RECIPIENT);
+    aad_hdr.push(stanzas.len() as u8);
+    aad_hdr.extend_from_slice(&base_iv);
+    aad_hdr.extend_from_slice(&chunk_count.to_be_bytes());
+    debug_assert_eq!(aad_hdr.len(), V2_AAD_HEADER_LEN);
+
+    // 7. Encrypt chunks. file_key (32 random bytes) is the PRK; HKDF-Expand
+    //    on a random key is well-defined. Salt is zero — the AAD still
+    //    binds the 22-byte header.
+    let zero_salt = [0u8; SALT_LEN];
+    let enc_result = encrypt_stream(&file_key, &padded, &base_iv, &aad_hdr, &zero_salt);
+    if enc_result.is_err() {
+        file_key.zeroize();
+        return enc_result.map(|(_, _, _)| Vec::new());
+    }
+    let (ct, chunk_count_out, ct_total_len) = enc_result?;
+    debug_assert_eq!(chunk_count, chunk_count_out);
+
+    // 8. Assemble output: 26-byte header || stanzas || ciphertext.
+    let mut out =
+        Vec::with_capacity(V2_HEADER_LEN + stanzas.len() * V2_STANZA_LEN + ct.len());
+    out.extend_from_slice(&MAGIC);
+    out.push(VERSION_RECIPIENT);
+    out.push(stanzas.len() as u8);
+    out.extend_from_slice(&base_iv);
+    out.extend_from_slice(&chunk_count.to_be_bytes());
+    out.extend_from_slice(&ct_total_len.to_be_bytes());
+    for s in &stanzas {
+        out.extend_from_slice(&s.ephemeral_pub);
+        out.extend_from_slice(&s.wrapped_key);
+    }
+    out.extend_from_slice(&ct);
+
+    file_key.zeroize();
+    Ok(out)
+}
+
+/// Decrypt a v2 recipient-based envelope. Tries each identity against each
+/// stanza until one unwraps the file_key, then decrypts the chunks.
+pub fn decrypt_envelope_recipients(
+    data: &[u8],
+    identities: &[keygen::Identity],
+) -> Result<Zeroizing<Vec<u8>>> {
+    if data.len() < V2_HEADER_LEN + V2_STANZA_LEN {
+        bail!("bad");
+    }
+    if &data[0..4] != MAGIC.as_slice() {
+        bail!("bad");
+    }
+    if data[4] != VERSION_RECIPIENT {
+        bail!("bad");
+    }
+    let recipient_count = data[5] as usize;
+    if recipient_count == 0 || recipient_count > MAX_RECIPIENTS {
+        bail!("bad");
+    }
+    let base_iv: [u8; IV_LEN] = data[6..18].try_into().unwrap();
+    let chunk_count =
+        u32::from_be_bytes(data[18..22].try_into().unwrap());
+    let ct_total_len =
+        u32::from_be_bytes(data[22..26].try_into().unwrap()) as usize;
+
+    // Validate chunk_count and ct_total_len the same way Slot::parse does.
+    if !(1..=MAX_CHUNKS).contains(&chunk_count) {
+        bail!("bad");
+    }
+    if !(TAG_LEN..=MAX_CT).contains(&ct_total_len) {
+        bail!("bad");
+    }
+    let min_ct_len = ((chunk_count as usize).saturating_sub(1))
+        .saturating_mul(CHUNK_SIZE + TAG_LEN)
+        .saturating_add(TAG_LEN);
+    let max_ct_len = (chunk_count as usize).saturating_mul(CHUNK_SIZE + TAG_LEN);
+    if ct_total_len < min_ct_len || ct_total_len > max_ct_len {
+        bail!("bad");
+    }
+
+    // Locate the stanza block and ciphertext.
+    let stanzas_start = V2_HEADER_LEN;
+    let stanzas_end = stanzas_start + recipient_count * V2_STANZA_LEN;
+    if data.len() < stanzas_end {
+        bail!("bad");
+    }
+    let ct_end = stanzas_end + ct_total_len;
+    // No trailing garbage allowed.
+    if data.len() != ct_end {
+        bail!("bad");
+    }
+
+    // Try to unwrap the file_key. Iterate stanzas outer, identities inner.
+    let mut file_key: Option<SecretBytes> = None;
+    for i in 0..recipient_count {
+        let s_off = stanzas_start + i * V2_STANZA_LEN;
+        let stanza = recipient::Stanza {
+            ephemeral_pub: data[s_off..s_off + X25519_PUB_LEN]
+                .try_into()
+                .unwrap(),
+            wrapped_key: data[s_off + X25519_PUB_LEN..s_off + V2_STANZA_LEN]
+                .try_into()
+                .unwrap(),
+        };
+        for id in identities {
+            if let Some(fk) = recipient::unwrap_file_key(&stanza, id)? {
+                file_key = Some(fk);
+                break;
+            }
+        }
+        if file_key.is_some() {
+            break;
+        }
+    }
+    let file_key = file_key.ok_or_else(|| anyhow::anyhow!("bad"))?;
+
+    // Reconstruct the 22-byte AAD header used during encryption.
+    let mut aad_hdr = Vec::with_capacity(V2_AAD_HEADER_LEN);
+    aad_hdr.extend_from_slice(&MAGIC);
+    aad_hdr.push(VERSION_RECIPIENT);
+    aad_hdr.push(recipient_count as u8);
+    aad_hdr.extend_from_slice(&base_iv);
+    aad_hdr.extend_from_slice(&chunk_count.to_be_bytes());
+    debug_assert_eq!(aad_hdr.len(), V2_AAD_HEADER_LEN);
+
+    // Decrypt the chunks. file_key is the PRK; salt is zero.
+    let zero_salt = [0u8; SALT_LEN];
+    let ct = &data[stanzas_end..ct_end];
+    let padded = decrypt_stream(
+        file_key.as_slice(),
+        ct,
+        &base_iv,
+        &aad_hdr,
+        &zero_salt,
+        chunk_count,
+    )?;
+
+    // Unpad (same as v1).
+    unpad_plaintext(&padded)
+}
+
+/// True if `data` is a v2 recipient envelope (SHR1 magic + version byte 2).
+pub fn is_sherd_recipient_envelope(data: &[u8]) -> bool {
+    data.len() >= 5 && data[..4] == MAGIC && data[4] == VERSION_RECIPIENT
+}
+
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+
+    #[test]
+    fn test_recipient_roundtrip_single() {
+        let id = keygen::Identity::generate();
+        let pub_bytes = id.public_key();
+        let pt = b"hello recipient v2";
+        let env = encrypt_envelope_recipients(pt, &[pub_bytes]).unwrap();
+        assert!(is_sherd_recipient_envelope(&env));
+        let recovered = decrypt_envelope_recipients(&env, &[id]).unwrap();
+        assert_eq!(recovered.as_slice(), pt);
+    }
+
+    #[test]
+    fn test_recipient_roundtrip_multi() {
+        let ids: Vec<keygen::Identity> =
+            (0..5).map(|_| keygen::Identity::generate()).collect();
+        let pubs: Vec<[u8; X25519_PUB_LEN]> =
+            ids.iter().map(|i| i.public_key()).collect();
+        let pt = b"multi-recipient secret";
+        let env = encrypt_envelope_recipients(pt, &pubs).unwrap();
+        // Each identity alone can decrypt.
+        for id in &ids {
+            let recovered = decrypt_envelope_recipients(&env, std::slice::from_ref(id)).unwrap();
+            assert_eq!(recovered.as_slice(), pt);
+        }
+    }
+
+    #[test]
+    fn test_recipient_wrong_identity_fails() {
+        let id1 = keygen::Identity::generate();
+        let id2 = keygen::Identity::generate();
+        let pub_bytes = id1.public_key();
+        let env = encrypt_envelope_recipients(b"only for id1", &[pub_bytes]).unwrap();
+        let res = decrypt_envelope_recipients(&env, &[id2]);
+        assert!(res.is_err(), "wrong identity must not decrypt");
+    }
+
+    #[test]
+    fn test_recipient_any_identity_succeeds() {
+        let id1 = keygen::Identity::generate();
+        let id2 = keygen::Identity::generate();
+        let id3 = keygen::Identity::generate();
+        let pubs = [id1.public_key(), id2.public_key(), id3.public_key()];
+        let pt = b"any of the three";
+        let env = encrypt_envelope_recipients(pt, &pubs).unwrap();
+        // id3 alone is enough.
+        let recovered =
+            decrypt_envelope_recipients(&env, std::slice::from_ref(&id3)).unwrap();
+        assert_eq!(recovered.as_slice(), pt);
+    }
+
+    #[test]
+    fn test_recipient_refuses_recursive_encrypt() {
+        let id = keygen::Identity::generate();
+        let pub_bytes = id.public_key();
+        let env = encrypt_envelope_recipients(b"first layer", &[pub_bytes]).unwrap();
+        let res = encrypt_envelope_recipients(&env, &[pub_bytes]);
+        assert!(res.is_err(), "must refuse to re-wrap an existing envelope");
+    }
+
+    #[test]
+    fn test_recipient_empty_recipients_rejected() {
+        let res = encrypt_envelope_recipients(b"x", &[]);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_recipient_tampered_header_rejected() {
+        let id = keygen::Identity::generate();
+        let pub_bytes = id.public_key();
+        let mut env = encrypt_envelope_recipients(b"tamper me", &[pub_bytes]).unwrap();
+        // Flip a bit in the chunk_count field.
+        env[18] ^= 0x01;
+        let res = decrypt_envelope_recipients(&env, std::slice::from_ref(&id));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_recipient_large_plaintext_roundtrip() {
+        let id = keygen::Identity::generate();
+        let pub_bytes = id.public_key();
+        // 2 MiB plaintext — exercises multi-chunk path.
+        let pt = vec![0x42u8; 2 * 1024 * 1024];
+        let env = encrypt_envelope_recipients(&pt, &[pub_bytes]).unwrap();
+        let recovered = decrypt_envelope_recipients(&env, std::slice::from_ref(&id)).unwrap();
+        assert_eq!(recovered.as_slice(), pt.as_slice());
     }
 }

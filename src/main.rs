@@ -14,6 +14,7 @@ mod envelope;
 mod memory;
 mod selftest;
 mod shamir;
+mod wordlist;
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +53,10 @@ enum Command {
     Selftest,
     /// Print the binary's own SHA-256 hash for out-of-band verification
     Hash,
+    /// Inspect an encrypted file's metadata without decrypting
+    Inspect(cli::InspectArgs),
+    /// Generate a new X25519 identity, or print the public key of an existing one
+    Keygen(cli::KeygenArgs),
 }
 
 /// Replace the default panic hook with one that prints a generic message.
@@ -259,6 +264,8 @@ fn main() -> Result<()> {
             println!("If the hash does not match a trusted fingerprint, DO NOT USE.");
             Ok(())
         }
+        Command::Inspect(args) => cli::cmd_inspect(&args.input),
+        Command::Keygen(args) => cli::cmd_keygen(args),
     };
 
     // Handlers return Err on the decrypt-failure path so Drop impls wipe

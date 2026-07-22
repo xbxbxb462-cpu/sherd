@@ -7,6 +7,7 @@
 
 use crate::armor;
 use crate::crypto::constants::*;
+use crate::crypto::keygen;
 use crate::envelope;
 use crate::memory::{self, SecretBytes};
 use crate::shamir;
@@ -22,8 +23,7 @@ use zeroize::Zeroizing;
 // Recursive-encryption detection helpers
 // ---------------------------------------------------------------------------
 
-/// Binary envelope magic "SHR1" + version byte 1. Used to detect
-/// already-encrypted input.
+/// Binary envelope magic "SHR1". Used to detect already-encrypted input.
 const SHERD_BINARY_MAGIC: &[u8] = b"SHR1";
 
 /// Armored message header line. Used to detect re-encryption of an
@@ -31,7 +31,10 @@ const SHERD_BINARY_MAGIC: &[u8] = b"SHR1";
 const SHERD_ARMOR_PREFIX: &str = "-----BEGIN SHERD MESSAGE-----";
 
 fn looks_like_sherd_binary(data: &[u8]) -> bool {
-    data.len() >= 5 && &data[..4] == SHERD_BINARY_MAGIC && data[4] == VERSION
+    // Match either v1 (passphrase) or v2 (recipient) envelopes.
+    data.len() >= 5
+        && &data[..4] == SHERD_BINARY_MAGIC
+        && (data[4] == VERSION || data[4] == VERSION_RECIPIENT)
 }
 
 fn looks_like_sherd_armored(data: &[u8]) -> bool {
@@ -132,6 +135,16 @@ pub struct EncryptArgs {
     #[arg(long)]
     pub pass_fd: Option<u32>,
 
+    /// Encrypt to this recipient (sherd1...). Can be repeated. Triggers
+    /// recipient-based (v2) mode; no passphrase is prompted.
+    #[arg(short = 'r', long)]
+    pub recipient: Vec<String>,
+
+    /// Read recipients from this file (one `sherd1...` per line, `#`
+    /// comments allowed). Triggers recipient-based (v2) mode.
+    #[arg(short = 'R', long)]
+    pub recipients_file: Option<PathBuf>,
+
     /// Allow re-encrypting an input that already looks like a Sherd
     /// artifact. Without this flag the CLI refuses to double-wrap. Use
     /// only when you genuinely need layered encryption.
@@ -179,6 +192,14 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
              If you genuinely need layered encryption, re-run with --force.\n\
              (If you intended to decrypt, use `sherd decrypt` instead.)"
         );
+    }
+
+    // Branch: recipient mode (v2) if any -r/-R flag is given, else v1
+    // passphrase mode.
+    let recipient_mode =
+        !args.recipient.is_empty() || args.recipients_file.is_some();
+    if recipient_mode {
+        return cmd_encrypt_message_recipients(&args, &plaintext);
     }
 
     let passphrase = get_passphrase(
@@ -263,6 +284,57 @@ pub fn cmd_encrypt_message(args: EncryptArgs) -> Result<()> {
     Ok(())
 }
 
+/// Recipient-based (v2) encrypt path. Called by `cmd_encrypt_message`
+/// when `-r`/`-R` is supplied. No passphrase, no Argon2id — the file
+/// key is wrapped per recipient via X25519.
+fn cmd_encrypt_message_recipients(
+    args: &EncryptArgs,
+    plaintext: &[u8],
+) -> Result<()> {
+    // Decoy/paranoid/KDF flags are v1-only; reject them to avoid silent
+    // misuse. The operator asked for recipient mode; pretending to honor
+    // a decoy would be dangerous.
+    if args.decoy.is_some()
+        || args.decoy_pass_file.is_some()
+        || args.decoy_pass_fd.is_some()
+        || args.paranoid
+        || args.pass_file.is_some()
+        || args.pass_fd.is_some()
+    {
+        bail!(
+            "recipient mode (-r/-R) is incompatible with passphrase, decoy, paranoid, or KDF flags"
+        );
+    }
+
+    let mut recipients: Vec<[u8; X25519_PUB_LEN]> = Vec::new();
+    for r in &args.recipient {
+        recipients.push(keygen::parse_recipient(r)?);
+    }
+    if let Some(path) = &args.recipients_file {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow!("recipients file read failed: {}", e))?;
+        recipients.extend(keygen::parse_recipient_file(&content)?);
+    }
+    if recipients.is_empty() {
+        bail!("no recipients specified");
+    }
+    if recipients.len() > MAX_RECIPIENTS {
+        bail!("too many recipients (max {})", MAX_RECIPIENTS);
+    }
+
+    eprintln!("[sherd] Encrypting to {} recipient(s)…", recipients.len());
+    let env = envelope::encrypt_envelope_recipients(plaintext, &recipients)?;
+
+    // Armored output, same as v1 message encrypt.
+    let armored = armor::armor(ARMOR_MSG, &env);
+    write_output(&args.output, armored.as_bytes())?;
+
+    // Do not print envelope size; leaks plaintext size.
+    let _ = env.len();
+    eprintln!("[sherd] Encrypted.");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Decrypt message
 // ---------------------------------------------------------------------------
@@ -282,6 +354,11 @@ pub struct DecryptArgs {
     /// Read passphrase from file descriptor N.
     #[arg(long)]
     pub pass_fd: Option<u32>,
+
+    /// Identity file for recipient-based (v2) decryption. May be repeated
+    /// to try multiple identities. Use `sherd keygen` to generate one.
+    #[arg(short = 'I', long)]
+    pub identity: Vec<PathBuf>,
     // The `pass` field is intentionally absent; see EncryptArgs.
 }
 
@@ -293,6 +370,33 @@ pub fn cmd_decrypt_message(args: DecryptArgs) -> Result<()> {
     )?);
     // Drop the armored copy to release memory before the passphrase prompt.
     drop(armored);
+
+    // v2 recipient envelope: magic + version byte 2.
+    if envelope::is_sherd_recipient_envelope(env.as_slice()) {
+        if args.identity.is_empty() {
+            bail!("recipient-mode message: no identity file provided (use -I)");
+        }
+        if args.pass_file.is_some() || args.pass_fd.is_some() {
+            bail!("recipient-mode message: -I identity is incompatible with --pass-file/--pass-fd");
+        }
+        let mut identities = Vec::new();
+        for path in &args.identity {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| anyhow!("identity file read failed: {}", e))?;
+            identities.extend(keygen::parse_identity_file(&content)?);
+        }
+        eprintln!("[sherd] Decrypting recipient envelope (X25519)…");
+        let pt = match envelope::decrypt_envelope_recipients(env.as_slice(), &identities) {
+            Ok(pt) => pt,
+            Err(_) => bail!(
+                "decryption failed: no matching identity or corrupted/tampered message"
+            ),
+        };
+        drop(env);
+        write_output(&args.output, &pt)?;
+        eprintln!("[sherd] Decrypted.");
+        return Ok(());
+    }
 
     let passphrase = get_passphrase(&args.pass_file, &args.pass_fd, "Passphrase: ")?;
 
@@ -758,6 +862,218 @@ pub fn cmd_share_combine(args: ShareCombineArgs) -> Result<()> {
     write_output(&args.output, &secret)?;
     // Do not print K or the share count; both leak the quorum threshold.
     eprintln!("[sherd] Reconstructed.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Inspect (no decryption)
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct InspectArgs {
+    /// Encrypted file to inspect
+    #[arg(short = 'i', long, required = true)]
+    pub input: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// Keygen
+// ---------------------------------------------------------------------------
+
+#[derive(Args)]
+pub struct KeygenArgs {
+    /// Write identity to this file (default: stdout). The file is created
+    /// with mode 0600.
+    #[arg(short = 'o', long)]
+    pub output: Option<PathBuf>,
+
+    /// Print only the public key (recipient string) of the identity given
+    /// via --input, then exit. Useful for deriving a recipient from an
+    /// existing identity file without re-generating.
+    #[arg(short = 'y', long)]
+    pub public: bool,
+
+    /// Read an existing identity from this file. Only meaningful with
+    /// --public.
+    #[arg(short = 'i', long)]
+    pub input: Option<PathBuf>,
+}
+
+/// `sherd keygen` — generate a new X25519 identity, or print the public
+/// key of an existing one.
+pub fn cmd_keygen(args: KeygenArgs) -> Result<()> {
+    if args.public {
+        // Print the public key of an existing identity.
+        let input = args
+            .input
+            .ok_or_else(|| anyhow!("--public requires --input <identity-file>"))?;
+        let content =
+            std::fs::read_to_string(&input).map_err(|e| anyhow!("identity read failed: {}", e))?;
+        let identities = keygen::parse_identity_file(&content)?;
+        if identities.len() > 1 {
+            bail!("identity file contains multiple keys; refusing to pick one");
+        }
+        // Print the recipient string (sherd1...) to stdout. Goes to a
+        // terminal in normal use; the public key is not secret.
+        println!("{}", identities[0].to_recipient_string());
+        return Ok(());
+    }
+
+    if args.input.is_some() {
+        bail!("--input is only meaningful with --public");
+    }
+
+    // Generate a fresh identity.
+    let id = keygen::Identity::generate();
+    let pubkey = id.to_recipient_string();
+    let content = format!(
+        "# sherd identity file — keep secret\n# public key: {}\n{}\n",
+        pubkey,
+        id.to_identity_string()
+    );
+
+    match args.output {
+        Some(path) => {
+            // write_atomic grants 0600 from the start.
+            write_atomic(&path, content.as_bytes())?;
+            // Print the public key to stderr so the operator can paste it
+            // without accidentally mixing it into stdout redirections.
+            eprintln!("[sherd] Identity written to {}", path.display());
+            eprintln!("[sherd] Public key: {}", pubkey);
+        }
+        None => {
+            // Stdout: the identity file content. Public key to stderr.
+            // io::stdout() is buffered; the identity is a short string
+            // and is flushed on process exit.
+            print!("{}", content);
+            eprintln!("[sherd] Public key: {}", pubkey);
+        }
+    }
+    Ok(())
+}
+
+/// Inspect an encrypted file's metadata without decrypting. Reads the
+/// fixed header and per-slot headers, prints structure and KDF params.
+/// Refuses anything that is not a recognizable Sherd artifact.
+pub fn cmd_inspect(input: &std::path::Path) -> Result<()> {
+    let data: Zeroizing<Vec<u8>> = open_and_read_bounded(input, MAX_INPUT_SIZE, "input")?;
+    let raw: &[u8] = data.as_slice();
+
+    println!("File: {}", input.display());
+    println!("Size: {} bytes", raw.len());
+
+    // Binary envelope path: magic + version byte.
+    if raw.len() >= 5 && raw[..4] == MAGIC {
+        println!("Encoding: binary");
+        return inspect_envelope(raw, raw.len());
+    }
+
+    // ASCII-armored path. Try SHERD MESSAGE then SHERD FILE labels.
+    if looks_like_sherd_armored(raw) {
+        let s = std::str::from_utf8(raw).map_err(|_| anyhow!("invalid UTF-8 in armored input"))?;
+        let env = armor::dearmor_with_label(s, ARMOR_MSG)
+            .or_else(|_| armor::dearmor_with_label(s, ARMOR_FILE))
+            .map_err(|_| anyhow!("armored input did not parse as SHERD MESSAGE or SHERD FILE"))?;
+        println!("Encoding: ASCII-armored");
+        // env is plain Vec<u8>; ciphertext bytes are not secret.
+        return inspect_envelope(&env, raw.len());
+    }
+
+    bail!("not a sherd file (no SHR1 magic or armor header found)");
+}
+
+/// Inspect a parsed binary envelope: print fixed-header fields and
+/// per-slot metadata without touching ciphertext or running the KDF.
+fn inspect_envelope(env: &[u8], armored_size: usize) -> Result<()> {
+    if env.len() < FIXED_HEADER_LEN {
+        bail!("envelope too short ({} bytes, need >= {})", env.len(), FIXED_HEADER_LEN);
+    }
+    let version = env[4];
+    println!("Format: sherd v{}", version);
+
+    match version {
+        1 => {
+            let (hdr, _fh) = envelope::FixedHeader::parse(env)
+                .map_err(|_| anyhow!("malformed fixed header"))?;
+            println!("Mode: passphrase");
+            println!("Cipher: AES-256-GCM");
+            println!("KDF: Argon2id (mem={} KiB, iters={}, par={})",
+                hdr.kdf_mem_kib, hdr.kdf_iters, hdr.kdf_par);
+            println!("Commit: HMAC-SHA256-trunc-128");
+            println!("Flags: 0x{:02x}", hdr.flags);
+            println!("  decoy:    {}", (hdr.flags & FLAG_DECOY) != 0);
+            println!("  paranoid: {}", (hdr.flags & FLAG_PARANOID) != 0);
+            println!("Slots: {}", hdr.slot_count);
+
+            // Parse slot headers (without decrypting) to surface chunk
+            // counts and ciphertext sizes. Slot::parse copies the ct
+            // bytes into a Vec<u8>; that copy is dropped at end of scope.
+            // Ciphertext is not secret material.
+            let mut rest = &env[FIXED_HEADER_LEN..];
+            let mut total_ct: u64 = 0;
+            for i in 0..hdr.slot_count {
+                let (remaining, slot) = envelope::Slot::parse(rest)
+                    .map_err(|_| anyhow!("malformed slot {}", i))?;
+                println!("  Slot {}: chunks={}, ciphertext={} bytes",
+                    i, slot.chunk_count, slot.ct_total_len);
+                total_ct += slot.ct_total_len as u64;
+                rest = remaining;
+            }
+            if !rest.is_empty() {
+                bail!("envelope has {} trailing bytes", rest.len());
+            }
+            println!("Total ciphertext: {} bytes", total_ct);
+            if armored_size != env.len() {
+                println!("Armored size: {} bytes", armored_size);
+            }
+        }
+        2 => {
+            // v2 recipient envelope. Header: magic(4) + version(1) +
+            // rcount(1) + base_iv(12) + chunk_count(4) + ct_total_len(4)
+            // = 26 bytes, then rcount * (32 + 48) = 80 bytes of stanzas,
+            // then ciphertext.
+            const V2_HDR_LEN: usize = 26;
+            const V2_STANZA_LEN: usize = X25519_PUB_LEN + WRAPPED_KEY_LEN;
+            if env.len() < V2_HDR_LEN {
+                bail!("v2 envelope too short ({} bytes)", env.len());
+            }
+            let rcount = env[5] as usize;
+            if rcount == 0 {
+                bail!("v2 envelope has zero recipients");
+            }
+            let chunk_count = u32::from_be_bytes(env[18..22].try_into().unwrap());
+            let ct_total_len = u32::from_be_bytes(env[22..26].try_into().unwrap());
+            println!("Mode: recipient (X25519)");
+            println!("Cipher: AES-256-GCM (per-chunk keys via HKDF-Expand from file_key)");
+            println!("Wrap: X25519 + HKDF-SHA256 + AES-256-GCM per recipient");
+            println!("KDF: none (file key is random; no Argon2id)");
+            println!("Commit: none (AEAD tags authenticate; AAD binds header)");
+            println!("Recipients: {}", rcount);
+            println!("Chunks: {}", chunk_count);
+            println!("Ciphertext: {} bytes", ct_total_len);
+            // Print first 8 bytes of each ephemeral pubkey as a fingerprint
+            // so the operator can eyeball which identities match without
+            // revealing the full pubkeys (which are also in the clear).
+            let stanzas_start = V2_HDR_LEN;
+            let stanzas_end = stanzas_start + rcount * V2_STANZA_LEN;
+            if env.len() < stanzas_end {
+                bail!("v2 envelope truncated in stanza block");
+            }
+            for i in 0..rcount {
+                let s_off = stanzas_start + i * V2_STANZA_LEN;
+                let eph = &env[s_off..s_off + X25519_PUB_LEN];
+                let fp: String = eph.iter().take(8).map(|b| format!("{:02x}", b)).collect();
+                println!("  Stanza {}: ephemeral={}…", i, fp);
+            }
+            if env.len() != stanzas_end + ct_total_len as usize {
+                bail!("v2 envelope has trailing bytes or truncated ciphertext");
+            }
+            if armored_size != env.len() {
+                println!("Armored size: {} bytes", armored_size);
+            }
+        }
+        _ => bail!("unknown envelope version: {}", version),
+    }
     Ok(())
 }
 
