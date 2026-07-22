@@ -20,7 +20,7 @@
 
 ---
 
-Sherd is a command-line encryption tool built around one assumption: the
+sherd is a command-line encryption tool built around one assumption: the
 adversary is competent. It encrypts messages and files with
 **AES-256-GCM** using keys derived through **Argon2id** and
 **HKDF-SHA256**, or with **X25519 recipient keys** for asymmetric
@@ -40,9 +40,9 @@ file, no network, no telemetry, no plugin loader.
 
 ---
 
-## Why Sherd?
+## Why sherd?
 
-Most encryption tools optimize for convenience. Sherd optimizes for the
+Most encryption tools optimize for convenience. sherd optimizes for the
 case where the adversary is competent and motivated.
 
 - **Memory is locked, not just zeroized.** `mlockall(MCL_CURRENT |
@@ -136,7 +136,7 @@ The binary lands in `~/.cargo/bin/sherd`.
 
 ### Memory locking
 
-Sherd refuses to run in release mode unless it can lock its address
+sherd refuses to run in release mode unless it can lock its address
 space against swap. Pick one:
 
 ```sh
@@ -161,7 +161,7 @@ sherd selftest   # runs Argon2id / HKDF / HMAC / AES-GCM known-answer tests
 
 ## Usage
 
-Sherd has nine subcommands. Run `sherd --help` for the full list, or
+sherd has nine subcommands. Run `sherd --help` for the full list, or
 `sherd <command> --help` for details.
 
 ### Passphrase encryption
@@ -313,7 +313,7 @@ sherd completion powershell | Out-String | Invoke-Expression
 
 ## Security model
 
-### What Sherd defends against
+### What sherd defends against
 
 - **Ciphertext-only attackers.** AES-256-GCM with per-chunk HKDF-derived
   keys; nonce reuse is structurally impossible (random `base_iv` per
@@ -349,9 +349,9 @@ sherd completion powershell | Out-String | Invoke-Expression
 - **TOCTOU on input.** Files are opened once, `fstat`'d on the fd, and
   read from the same fd.
 
-### What Sherd does not defend against
+### What sherd does not defend against
 
-- **A compromised OS or hardware implant.** If the kernel is hostile,
+- **A compromized OS or hardware implant.** If the kernel is hostile,
   `mlockall` is a suggestion. Use an air-gapped machine running Tails
   for high-stakes operations.
 - **Cold boot attacks.** Reboot cold before and after sensitive
@@ -429,8 +429,8 @@ ASCII armor wraps either format as:
 
 If the OS can swap your passphrase or master key to disk, it can be
 recovered later by anyone with physical access. `mlockall` prevents
-that. If you cannot grant `CAP_IPC_LOCK` or raise `RLIMIT_MEMLOCK`,
-Sherd refuses to run in release mode.
+that. If you cannot grant `CAP_IPC_LOCK` or aise `RLIMIT_MEMLOCK`,
+sherd refuses to run in release mode.
 
 **Why is there no config file?**
 
@@ -455,41 +455,4 @@ passphrase.
 **What happens if I lose my identity file?**
 
 The file key is wrapped to your X25519 public key. Without the private
-key, it cannot be recovered. There is no escrow, no recovery, no
-backdoor.
-
-**Is the format stable?**
-
-The v1 and v2 formats are stable as of sherd 1.0. Future versions will
-add new version bytes, not break existing ones. The ASCII armor labels
-(`SHERD MESSAGE`, `SHERD FILE`, `SHERD SHARE`) are fixed.
-
-**Why not ChaCha20-Poly1305?**
-
-AES-256-GCM has hardware acceleration on x86_64 and ARM64, which makes
-constant-time implementation easier to verify. ChaCha20-Poly1305 is a
-fine cipher; this is a preference, not a security claim.
-
-## Contributing
-
-Pull requests are welcome. Before submitting:
-
-```sh
-cargo fmt
-cargo clippy --release -- -D warnings
-cargo test
-```
-
-The CI workflow runs the same checks on every push and pull request.
-
-If you find a security issue, **do not open a public issue**. See
-[`SECURITY.md`](SECURITY.md) for the private disclosure process.
-
-## License
-
-Dual-licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
-
-at your option. Contribution under the same dual license.
+key, it cannot be recovered. There is no escrow, no recovery,Š
