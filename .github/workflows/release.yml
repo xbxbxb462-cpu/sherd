@@ -1,0 +1,78 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Strip binary
+        if: runner.os != 'macOS'
+        run: |
+          strip target/${{ matrix.target }}/release/sherd
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/sherd dist/sherd-${{ matrix.target }}
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md dist/
+          cd dist
+          tar czf sherd-${{ matrix.target }}.${{ matrix.archive }} *
+          cd ..
+          shasum -a 256 dist/sherd-${{ matrix.target }}.${{ matrix.archive }} > dist/sherd-${{ matrix.target }}.sha256
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sherd-${{ matrix.target }}
+          path: dist/
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Merge artifacts
+        run: |
+          mkdir -p release
+          find dist -type f -exec cp {} release/ \;
+          ls -la release/
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}
