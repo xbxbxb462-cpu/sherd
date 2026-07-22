@@ -2,7 +2,7 @@
 name = "sherd"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 authors = ["The sherd maintainers <security@sherd.dev>"]
 license = "MIT OR Apache-2.0"
 description = "Offline single-binary encryption: AES-256-GCM + Argon2id with plausible deniability, X25519 recipients, and Shamir secret sharing"
