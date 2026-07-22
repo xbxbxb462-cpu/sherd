@@ -14,7 +14,7 @@
   <a href="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/xbxbxb462-cpu/sherd/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/xbxbxb462-cpu/sherd/releases"><img alt="Release" src="https://img.shields.io/github/v/release/xbxbxb462-cpu/sherd?display_name=tag&sort=semver"></a>
   <a href="LICENSE-MIT"><img alt="License" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg"></a>
-  <img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.74-orange.svg">
+  <img alt="MSRV" src="https://img.shields.io/badge/MSRV-1.85-orange.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20BSD-lightgrey.svg">
 </p>
 
@@ -95,7 +95,7 @@ For the full protocol specification, see [`docs/protocol.md`](docs/protocol.md).
 ## Quickstart
 
 ```sh
-# from source (requires Rust 1.74+)
+# from source (requires Rust 1.85+)
 git clone https://github.com/xbxbxb462-cpu/sherd.git
 cd sherd
 cargo install --path .
@@ -145,7 +145,7 @@ cargo binstall sherd
 
 ### From source
 
-Requires Rust 1.74 or newer.
+Requires Rust 1.85 or newer.
 
 ```sh
 git clone https://github.com/xbxbxb462-cpu/sherd.git
